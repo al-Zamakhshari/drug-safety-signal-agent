@@ -1,0 +1,67 @@
+# Drug Safety Signal Agent — fully local stack
+# Requirements: Docker Desktop with Model Runner enabled
+# Usage: docker compose up -d
+# Then: uv run python main.py semaglutide
+
+models:
+  gemma4:
+    model: ai/gemma4:E4B   # ~4GB download on first run, cached after
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD:-Admin@changeme1}
+      - plugins.security.disabled=false
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -u admin:${OPENSEARCH_PASSWORD:-Admin@changeme1} -k https://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.19.1
+    ports:
+      - "5601:5601"
+    environment:
+      - OPENSEARCH_HOSTS=["https://opensearch:9200"]
+      - OPENSEARCH_USERNAME=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Admin@changeme1}
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"
+      - "4317:4317"
+    environment:
+      - PHOENIX_WORKING_DIR=/phoenix
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - OPENSEARCH_URL=https://opensearch:9200
+      - OPENSEARCH_USER=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Admin@changeme1}
+      - PHOENIX_URL=http://phoenix:6006
+      - LOCAL_MODEL_URL=http://model-runner.docker.internal/engines/llama.cpp/v1
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      phoenix:
+        condition: service_started
+    models:
+      - gemma4
+
+volumes:
+  opensearch_data:

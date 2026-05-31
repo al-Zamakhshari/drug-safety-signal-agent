@@ -1,0 +1,10 @@
+__pycache__/
+*.py[oc]
+.venv/
+.env
+*.zip
+faers_data/
+.DS_Store
+dist/
+*.egg-info/
+uv.lock
