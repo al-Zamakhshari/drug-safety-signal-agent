@@ -1,101 +1,123 @@
 """
 Drug Safety Signal Detection — LangGraph pipeline
 
-Design principle for small local models (Gemma4 E4B):
-  - Python handles ALL data retrieval and computation
-  - LLM has exactly ONE job: write the final report
-  - Context passed to LLM: ~500 tokens (structured tables, not raw JSON)
+Node responsibilities:
+  Python nodes  → all data retrieval and computation (deterministic)
+  Gemma4 E4B   → two roles:
+    1. investigator_node: function calling — decides which tools to call,
+       detects class effects / DDI / temporal trends for novel signals
+    2. write_report: formats structured findings into clinical prose
 
 Graph:
-  resolve_names → calculate_prr → fetch_label → [search_literature?] → write_report
-
-Conditional edge: literature search only runs if unlabeled signals exist.
+  resolve_names → calculate_prr → fetch_label
+       → [search_literature?]
+       → [investigator?]        ← NEW: fires for PRR≥5 unlabeled signals
+       → write_report
 """
 
 import os
 import json
+import re
 from typing import TypedDict, Optional
 from dotenv import load_dotenv
 
 from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import create_react_agent
+from langchain_openai import ChatOpenAI
 
 from agent.tools.prr import calculate_prr, get_drug_names
 from agent.tools.openfda import get_drug_label
 from agent.tools.pubmed import search_literature
+from agent.tools.investigator_tools import (
+    get_prr, check_class_effect, check_ddi, get_signal_trend
+)
 
 load_dotenv()
 
 LOCAL_MODEL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:12434/v1")
 
+# ---------------------------------------------------------------------------
+# Shared model — ChatOpenAI pointing at Docker Model Runner
+# ---------------------------------------------------------------------------
+
+def _model(max_tokens: int = 800) -> ChatOpenAI:
+    return ChatOpenAI(
+        model="docker.io/ai/gemma4:E4B",
+        base_url=LOCAL_MODEL_URL,
+        api_key="docker",
+        max_tokens=max_tokens,
+        temperature=0,          # deterministic — critical for reliable tool calling
+    )
+
 
 # ---------------------------------------------------------------------------
-# State — typed dict passed between nodes
+# Investigator sub-agent (create_react_agent)
+# Gemma4 E4B with 4 tools — handles its own multi-turn tool-call loop
+# ---------------------------------------------------------------------------
+
+_investigator_agent = create_react_agent(
+    _model(max_tokens=1000),    # extra headroom for thinking + tool call JSON
+    tools=[get_prr, check_class_effect, check_ddi, get_signal_trend],
+)
+
+
+# ---------------------------------------------------------------------------
+# State
 # ---------------------------------------------------------------------------
 
 class DrugSafetyState(TypedDict):
     drug_name:          str
-    drug_names:         list[str]          # all brand+generic names resolved
-    prr_signals:        list[dict]         # [{reaction, prr, drug_count}]
+    drug_names:         list[str]
+    prr_signals:        list[dict]   # [{reaction, prr, drug_count}]
     drug_total:         int
     faers_total:        int
-    labeled_reactions:  list[str]          # from FDA label (ALL CAPS)
-    literature:         list[dict]         # [{signal, papers, supports}]
-    briefing:           str                # final LLM output
+    labeled_reactions:  list[str]
+    literature:         list[dict]
+    investigation:      list[dict]   # [{signal, classification, evidence}]
+    briefing:           str
     error:              Optional[str]
 
 
 # ---------------------------------------------------------------------------
-# Nodes — pure Python (no LLM except write_report)
+# Python nodes — no LLM
 # ---------------------------------------------------------------------------
 
 async def resolve_names(state: DrugSafetyState) -> dict:
-    """Resolve drug name to all FAERS variants (generic + brand names)."""
     result = await get_drug_names(state["drug_name"])
     names = result.get("found_names", [state["drug_name"].upper()])
-    print(f"  [resolve_names] {state['drug_name']} → {names}")
+    print(f"  [names]  {state['drug_name']} → {names}")
     return {"drug_names": names}
 
 
 async def calculate_prr_signals(state: DrugSafetyState) -> dict:
-    """Calculate PRR for all reactions. Pure Python — no LLM."""
     result = await calculate_prr(state["drug_names"], top_n=50)
     signals = result.get("signals", [])
-    print(f"  [calculate_prr] {result['drug_total']:,} drug reports | "
-          f"{result['faers_total']:,} total | {len(signals)} signals (PRR≥2)")
+    print(f"  [PRR]    {result['drug_total']:,} reports | "
+          f"{result['faers_total']:,} total | {len(signals)} signals")
     return {
-        "prr_signals":  signals,
-        "drug_total":   result["drug_total"],
-        "faers_total":  result["faers_total"],
+        "prr_signals": signals,
+        "drug_total":  result["drug_total"],
+        "faers_total": result["faers_total"],
     }
 
 
 async def fetch_label(state: DrugSafetyState) -> dict:
-    """Fetch FDA label reactions. Pure Python — no LLM."""
-    drug = state["drug_name"].lower()
-    label = await get_drug_label(drug)
+    label = await get_drug_label(state["drug_name"].lower())
     reactions: list[str] = []
     for section in ("boxed_warning", "warnings_and_cautions", "adverse_reactions"):
         text = " ".join(label.get(section, []))
-        # Quick extraction: find capitalized medical terms
-        import re
-        found = re.findall(r'\b[A-Z][A-Z\s]{3,}\b', text.upper())
-        reactions.extend(found)
-    # Clean up
+        reactions.extend(re.findall(r'\b[A-Z][A-Z\s]{3,}\b', text.upper()))
     reactions = list({r.strip() for r in reactions if 3 < len(r.strip()) < 60})
-    print(f"  [fetch_label] {len(reactions)} labeled reactions")
+    print(f"  [label]  {len(reactions)} labeled reactions")
     return {"labeled_reactions": reactions}
 
 
 async def search_lit(state: DrugSafetyState) -> dict:
-    """Search PubMed for top unlabeled signals. Pure Python — no LLM."""
     labeled = set(state.get("labeled_reactions", []))
-    unlabeled = [
-        s for s in state["prr_signals"]
-        if s["reaction"] not in labeled
-    ][:3]  # top 3 by PRR
-
+    # Top 3 unlabeled signals by PRR
+    targets = [s for s in state["prr_signals"] if s["reaction"] not in labeled][:3]
     literature = []
-    for signal in unlabeled:
+    for signal in targets:
         result = await search_literature(state["drug_name"], signal["reaction"])
         papers = result.get("papers", [])
         literature.append({
@@ -105,96 +127,178 @@ async def search_lit(state: DrugSafetyState) -> dict:
             "pmids":    [p.get("pmid", "") for p in papers[:3]],
             "supports": len(papers) > 0,
         })
-        print(f"  [literature] {signal['reaction']}: {len(papers)} papers")
-
+        print(f"  [lit]    {signal['reaction']}: {len(papers)} papers")
     return {"literature": literature}
 
 
-async def write_report(state: DrugSafetyState) -> dict:
-    """
-    ONE LLM call — Gemma4 E4B writes the final report from structured data.
-    Context is ~500 tokens: just the tables it needs to format.
-    """
-    import litellm
+# ---------------------------------------------------------------------------
+# Investigator node — Gemma4 E4B with function calling
+# ---------------------------------------------------------------------------
 
+async def investigate(state: DrugSafetyState) -> dict:
+    """
+    Gemma4 E4B investigates the top novel signals using function calling.
+    Runs get_prr, check_class_effect, check_ddi, get_signal_trend autonomously.
+    Returns structured classification for each investigated signal.
+    """
+    labeled = set(state.get("labeled_reactions", []))
+    # Only investigate strong unlabeled signals (PRR≥5, n≥10)
+    targets = [
+        s for s in state["prr_signals"]
+        if s["reaction"] not in labeled
+        and s["prr"] >= 5.0
+        and s["drug_count"] >= 10
+    ][:3]
+
+    if not targets:
+        print("  [invest] no strong unlabeled signals to investigate")
+        return {"investigation": []}
+
+    drug = state["drug_names"][0]
+    reactions_str = ", ".join(f"{s['reaction']} (PRR={s['prr']})" for s in targets)
+
+    # GLP-1 comparators — hardcoded for now, could be dynamic
+    comparators = ["LIRAGLUTIDE", "DULAGLUTIDE", "TIRZEPATIDE", "EXENATIDE"]
+    comparators = [c for c in comparators if c not in state["drug_names"]][:3]
+
+    prompt = (
+        f"Investigate these novel safety signals for {drug}: {reactions_str}\n\n"
+        f"For each signal:\n"
+        f"1. Use get_prr to confirm the PRR\n"
+        f"2. Use check_class_effect with comparators {comparators} "
+        f"to determine if it's class-wide or drug-specific\n"
+        f"3. If signal is strong and drug-specific, use get_signal_trend to see "
+        f"when it emerged\n\n"
+        f"Then classify each as: CLASS_EFFECT | DRUG_SPECIFIC | GROWING | DDI_SUSPECT\n"
+        f"Be concise. One classification per signal."
+    )
+
+    print(f"  [invest] investigating {len(targets)} signals: "
+          f"{[s['reaction'] for s in targets]}")
+
+    result = await _investigator_agent.ainvoke({"messages": [("user", prompt)]})
+
+    # Extract final text response
+    final_msg = result["messages"][-1]
+    investigation_text = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
+
+    # Count tool calls made
+    tool_calls = sum(
+        1 for m in result["messages"]
+        if hasattr(m, "tool_calls") and m.tool_calls
+    )
+    print(f"  [invest] {tool_calls} tool calls → classification done")
+
+    # Structure the output
+    investigation = [{
+        "signals_investigated": [s["reaction"] for s in targets],
+        "tool_calls_made":      tool_calls,
+        "findings":             investigation_text,
+    }]
+    return {"investigation": investigation}
+
+
+# ---------------------------------------------------------------------------
+# Report writer — Gemma4 E4B formats everything into clinical prose
+# ---------------------------------------------------------------------------
+
+async def write_report(state: DrugSafetyState) -> dict:
     labeled = set(state.get("labeled_reactions", []))
     lit_map = {l["signal"]: l for l in state.get("literature", [])}
 
-    # Build compact PRR table string
-    prr_rows = []
+    # Build PRR table
+    rows = []
     for s in state["prr_signals"][:15]:
         rxn = s["reaction"]
         is_labeled = "Yes" if rxn in labeled else "**No ⚠️**"
-        papers = lit_map.get(rxn, {}).get("papers", "-")
-        prr_rows.append(f"| {rxn} | {s['prr']} | {s['drug_count']} | {is_labeled} | {papers} |")
+        papers = lit_map.get(rxn, {}).get("papers", "—")
+        rows.append(f"| {rxn} | {s['prr']} | {s['drug_count']} | {is_labeled} | {papers} |")
 
-    prr_table = "\n".join(prr_rows) if prr_rows else "| No signals detected | - | - | - | - |"
+    prr_table = "\n".join(rows) if rows else "| No signals | — | — | — | — |"
+
+    # Investigation findings (if any)
+    invest_section = ""
+    if state.get("investigation"):
+        inv = state["investigation"][0]
+        findings = inv.get("findings", "").strip()
+        tools_used = inv.get("tool_calls_made", 0)
+        signals_inv = inv.get("signals_investigated", [])
+        if findings and findings != "[Empty response from model]":
+            invest_section = (
+                f"\n\nINVESTIGATION ({tools_used} tool calls on {signals_inv}):\n"
+                f"{findings}\n"
+                f"Use this to fill the Investigation Results section."
+            )
 
     prompt = f"""Write a drug safety briefing for {state['drug_name'].upper()}.
 
 DATA:
-- FAERS reports for drug: {state['drug_total']:,}
-- Total FAERS database: {state['faers_total']:,}
-- PRR signals detected: {len(state['prr_signals'])}
+- Drug reports in FAERS: {state['drug_total']:,}
+- Total FAERS index: {state['faers_total']:,}
+- Signals detected (PRR≥2): {len(state['prr_signals'])}
+{invest_section}
 
-PRR SIGNALS TABLE (already calculated — just format it):
-| Reaction | PRR | Reports | Labeled? | Papers |
-|----------|-----|---------|----------|--------|
+PRR TABLE (pre-computed — copy into briefing):
+| Reaction | PRR | Reports | In FDA Label? | Literature |
+|----------|-----|---------|---------------|------------|
 {prr_table}
 
-LABELED REACTIONS (from FDA label): {', '.join(list(labeled)[:10])}
-
-Write this exact format:
+WRITE THIS FORMAT:
 ## Drug Safety Briefing: {state['drug_name'].upper()}
-**FAERS reports analysed**: {state['drug_total']:,}  |  **Total index**: {state['faers_total']:,}
+**FAERS reports analysed**: {state['drug_total']:,}  |  **Index**: {state['faers_total']:,}
 
 ### Signals Detected (PRR ≥ 2.0)
-| Reaction | PRR | Reports | In FDA Label? | Literature |
-[copy the table above]
+[copy table above]
+
+### Investigation Results
+[summarise investigation findings if available, else skip this section]
 
 ### Key Findings
-2-3 bullet points on the most important signals, focusing on unlabeled ones.
+2-3 bullet points focusing on unlabeled signals.
 
 **Risk**: LOW/MEDIUM/HIGH
 **Action**: MONITOR/INVESTIGATE/ESCALATE
 
 > Research only. Requires clinical validation."""
 
-    print(f"  [write_report] calling Gemma4 E4B (~{len(prompt)//4} tokens)...")
+    print(f"  [report] writing briefing (~{len(prompt)//4} tokens)...")
 
     try:
-        resp = await litellm.acompletion(
-            model="openai/docker.io/ai/gemma4:E4B",
-            base_url=LOCAL_MODEL_URL,
-            api_key="docker",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=2000,
-        )
-        briefing = resp.choices[0].message.content or ""
-        print(f"  [write_report] got {len(briefing)} chars, finish={resp.choices[0].finish_reason}")
-        # Strip thinking tokens if present
+        resp = await _model(max_tokens=2000).ainvoke(prompt)
+        briefing = resp.content or ""
         if "<think>" in briefing:
             briefing = briefing.split("</think>")[-1].strip()
         if not briefing:
-            briefing = f"[Model returned empty response — finish_reason: {resp.choices[0].finish_reason}]"
+            briefing = "[Empty response from model]"
     except Exception as e:
-        print(f"  [write_report] ERROR: {e}")
         briefing = f"[Report generation failed: {e}]"
 
     return {"briefing": briefing}
 
 
 # ---------------------------------------------------------------------------
-# Routing
+# Routing logic
 # ---------------------------------------------------------------------------
 
 def should_search_literature(state: DrugSafetyState) -> str:
-    """Only search PubMed if there are unlabeled signals worth investigating."""
     labeled = set(state.get("labeled_reactions", []))
     unlabeled = [s for s in state["prr_signals"] if s["reaction"] not in labeled]
-    has_strong = any(s["prr"] >= 3.0 and s["drug_count"] >= 10 for s in unlabeled)
-    result = "search_lit" if (unlabeled and has_strong) else "write_report"
-    print(f"  [route] {len(unlabeled)} unlabeled signals → {result}")
+    needs_lit = unlabeled and any(s["prr"] >= 3.0 and s["drug_count"] >= 10 for s in unlabeled)
+    result = "search_lit" if needs_lit else "investigate"
+    print(f"  [route]  {len(unlabeled)} unlabeled → {result}")
+    return result
+
+
+def should_investigate(state: DrugSafetyState) -> str:
+    labeled = set(state.get("labeled_reactions", []))
+    strong_unlabeled = [
+        s for s in state["prr_signals"]
+        if s["reaction"] not in labeled
+        and s["prr"] >= 5.0
+        and s["drug_count"] >= 10
+    ]
+    result = "investigate" if strong_unlabeled else "write_report"
+    print(f"  [route]  {len(strong_unlabeled)} strong unlabeled → {result}")
     return result
 
 
@@ -209,21 +313,31 @@ def build_pipeline() -> StateGraph:
     graph.add_node("calculate_prr",  calculate_prr_signals)
     graph.add_node("fetch_label",    fetch_label)
     graph.add_node("search_lit",     search_lit)
+    graph.add_node("investigate",    investigate)
     graph.add_node("write_report",   write_report)
 
     graph.set_entry_point("resolve_names")
     graph.add_edge("resolve_names", "calculate_prr")
     graph.add_edge("calculate_prr", "fetch_label")
+
+    # After label: search literature if strong unlabeled signals exist
     graph.add_conditional_edges(
         "fetch_label",
         should_search_literature,
-        {"search_lit": "search_lit", "write_report": "write_report"}
+        {"search_lit": "search_lit", "investigate": "investigate"},
     )
-    graph.add_edge("search_lit",  "write_report")
+
+    # After literature: investigate if strong novel signals remain
+    graph.add_conditional_edges(
+        "search_lit",
+        should_investigate,
+        {"investigate": "investigate", "write_report": "write_report"},
+    )
+
+    graph.add_edge("investigate",  "write_report")
     graph.add_edge("write_report", END)
 
     return graph.compile()
 
 
-# Singleton — compiled once at import
 pipeline = build_pipeline()
