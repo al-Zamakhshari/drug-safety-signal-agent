@@ -129,41 +129,49 @@ async def calculate_prr(
 
 async def get_drug_names(drug_name: str) -> dict[str, Any]:
     """
-    Look up all name variants for a drug from the FAERS index itself.
-    More reliable than RxNorm for drugs with many brand names.
+    Resolve a drug name to all FAERS variants using two-step lookup:
+    1. RxNorm API  → canonical generic + official brand names
+    2. FAERS index → any additional name variants actually in the data
 
     Args:
         drug_name: Generic or brand name (case-insensitive)
     Returns:
         dict with found_names list (ALL CAPS, as stored in FAERS)
     """
-    client = _client()
+    import httpx
+
+    RXNORM = "https://rxnav.nlm.nih.gov/REST"
+    all_names: set[str] = {drug_name.upper()}
+
+    # Step 1: RxNorm — get official brand names
     try:
-        resp = await client.search(
-            index=INDEX,
-            body={
-                "size": 0,
-                "query": {
-                    "wildcard": {
-                        "drug_names": {
-                            "value": f"*{drug_name.upper()}*",
-                            "case_insensitive": True,
-                        }
-                    }
-                },
-                "aggs": {
-                    "names": {"terms": {"field": "drug_names", "size": 20}}
-                },
-            },
-        )
-        names = [
-            b["key"]
-            for b in resp["aggregations"]["names"]["buckets"]
-            if drug_name.upper() in b["key"].upper()
-        ]
-        return {"query": drug_name, "found_names": names or [drug_name.upper()]}
-    finally:
-        await client.close()
+        async with httpx.AsyncClient(timeout=10) as http:
+            # Resolve to ingredient RxCUI
+            r = await http.get(f"{RXNORM}/rxcui.json",
+                               params={"name": drug_name, "search": "1"})
+            rxcui = r.json().get("idGroup", {}).get("rxnormId", [None])[0]
+
+            if rxcui:
+                # Get brand names (BN tty)
+                r2 = await http.get(f"{RXNORM}/rxcui/{rxcui}/related.json",
+                                    params={"tty": "BN"})
+                for grp in r2.json().get("relatedGroup", {}).get("conceptGroup", []):
+                    for prop in grp.get("conceptProperties", []):
+                        name = prop.get("name", "").upper().strip()
+                        if name and not any(c.isdigit() for c in name):
+                            all_names.add(name)
+    except Exception:
+        pass  # RxNorm unavailable — fall back to FAERS index lookup
+
+    # Known fallbacks for withdrawn drugs not in RxNorm BN
+    FALLBACKS = {
+        "ROFECOXIB": ["VIOXX"], "CERIVASTATIN": ["BAYCOL"],
+        "CISAPRIDE": ["PROPULSID"], "TERFENADINE": ["SELDANE"],
+    }
+    all_names.update(FALLBACKS.get(drug_name.upper(), []))
+
+    found = sorted(all_names)
+    return {"query": drug_name, "found_names": found}
 
 
 async def get_signal_timeline(
