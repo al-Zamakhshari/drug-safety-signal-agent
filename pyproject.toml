@@ -21,6 +21,7 @@ dependencies = [
     "langgraph>=1.2.2",
     "langchain-core>=1.4.0",
     "langchain-openai>=1.2.2",
+    "polars>=1.41.2",
 ]
 
 [build-system]
