@@ -34,7 +34,8 @@ from agent.tools.investigator_tools import (
 
 load_dotenv()
 
-LOCAL_MODEL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:12434/v1")
+LOCAL_MODEL_URL  = os.getenv("LOCAL_MODEL_URL", "http://localhost:12434/v1")
+LOCAL_MODEL_NAME = os.getenv("LOCAL_MODEL_NAME", "docker.io/ai/gemma4:E2B")
 
 # ---------------------------------------------------------------------------
 # Shared model — ChatOpenAI pointing at Docker Model Runner
@@ -42,7 +43,7 @@ LOCAL_MODEL_URL = os.getenv("LOCAL_MODEL_URL", "http://localhost:12434/v1")
 
 def _model(max_tokens: int = 800) -> ChatOpenAI:
     return ChatOpenAI(
-        model="docker.io/ai/gemma4:E4B",
+        model=LOCAL_MODEL_NAME,
         base_url=LOCAL_MODEL_URL,
         api_key="docker",
         max_tokens=max_tokens,

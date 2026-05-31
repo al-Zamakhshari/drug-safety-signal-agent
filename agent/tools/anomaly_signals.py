@@ -62,11 +62,16 @@ async def get_anomaly_signals(
     client = _client()
     try:
         # Check index has data for this drug
-        count_r = await client.count(
-            index=RATES_INDEX,
-            body={"query": {"term": {"drug": drug}}}
-        )
-        if count_r["count"] == 0:
+        try:
+            count_r = await client.count(
+                index=RATES_INDEX,
+                body={"query": {"term": {"drug": drug}}}
+            )
+            doc_count = count_r["count"]
+        except Exception:
+            doc_count = 0
+
+        if doc_count == 0:
             return {
                 "drug": drug,
                 "signals": [],
