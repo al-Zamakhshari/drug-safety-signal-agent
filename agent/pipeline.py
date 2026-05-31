@@ -28,8 +28,10 @@ from agent.tools.prr import calculate_prr, get_drug_names
 from agent.tools.openfda import get_drug_label
 from agent.tools.pubmed import search_literature
 from agent.tools.anomaly_signals import get_anomaly_signals
+from agent.tools.signal_memory import save_finding, search_findings
 from agent.tools.investigator_tools import (
-    get_prr, check_class_effect, get_signal_trend
+    get_prr, check_class_effect, get_signal_trend,
+    compare_time_periods, search_faers,
 )
 
 load_dotenv()
@@ -57,9 +59,14 @@ def _model(max_tokens: int = 800) -> ChatOpenAI:
 # ---------------------------------------------------------------------------
 
 _investigator_agent = create_react_agent(
-    _model(max_tokens=1000),    # extra headroom for thinking + tool call JSON
-    tools=[get_prr, check_class_effect, get_signal_trend],
-    # check_ddi removed — tool never invoked in prompt, metric was incorrect
+    _model(max_tokens=1000),
+    tools=[
+        get_prr,              # confirm PRR for a specific drug+reaction
+        check_class_effect,   # is it class-wide or drug-specific?
+        get_signal_trend,     # GROWING / STABLE / EMERGING over time
+        compare_time_periods, # DataDistributionTool: baseline vs recent period
+        search_faers,         # flexible DSL: by sex, seriousness, country, etc.
+    ],
 )
 
 
@@ -70,12 +77,13 @@ _investigator_agent = create_react_agent(
 class DrugSafetyState(TypedDict):
     drug_name:          str
     drug_names:         list[str]
-    prr_signals:        list[dict]   # [{reaction, prr, drug_count}]
+    prr_signals:        list[dict]   # [{reaction, prr, drug_count, chi2, significant}]
     drug_total:         int
     faers_total:        int
-    anomaly_signals:    list[dict]   # [{reaction, max_ratio, anomaly_grade}]
+    anomaly_signals:    list[dict]   # [{reaction, max_ratio, trend}]
     label_text:         str          # raw label text for token-overlap matching
     literature:         list[dict]
+    past_findings:      list[dict]   # from ML Memory — prior run results
     investigation:      list[dict]
     briefing:           str
     error:              Optional[str]
@@ -198,6 +206,47 @@ async def resolve_names(state: DrugSafetyState) -> dict:
     return {"drug_names": names}
 
 
+async def load_memory(state: DrugSafetyState) -> dict:
+    """Load past findings from ML Memory — gives investigator cross-run context."""
+    try:
+        findings = await search_findings(state["drug_name"], top_n=3)
+        if findings and "error" not in findings[0]:
+            print(f"  [memory] {len(findings)} past run(s) found in ML Memory")
+        else:
+            print(f"  [memory] first run for {state['drug_name']} — no prior findings")
+    except Exception as e:
+        findings = []
+        print(f"  [memory] unavailable ({e})")
+    return {"past_findings": findings}
+
+
+async def save_memory(state: DrugSafetyState) -> dict:
+    """Save this run's findings to ML Memory for future reference."""
+    inv_text = ""
+    if state.get("investigation"):
+        inv_text = state["investigation"][0].get("findings", "")
+
+    # Derive risk from briefing or fallback
+    risk = "MEDIUM"
+    briefing = state.get("briefing", "")
+    for level in ("HIGH", "MEDIUM", "LOW"):
+        if f"**Risk**: {level}" in briefing:
+            risk = level
+            break
+
+    try:
+        result = await save_finding(
+            drug=state["drug_name"],
+            signals=state.get("prr_signals", []),
+            investigation=inv_text,
+            risk=risk,
+        )
+        print(f"  [memory] saved to ML Memory → message_id={result.get('message_id','?')}")
+    except Exception as e:
+        print(f"  [memory] save failed ({e})")
+    return {}  # no state change needed
+
+
 async def calculate_prr_signals(state: DrugSafetyState) -> dict:
     result = await calculate_prr(state["drug_names"], top_n=50)
     signals = result.get("signals", [])
@@ -286,20 +335,30 @@ async def investigate(state: DrugSafetyState) -> dict:
 
     drug = state["drug_names"][0]
     reactions_str = ", ".join(f"{s['reaction']} (PRR={s['prr']})" for s in targets)
-
-    # GLP-1 comparators — hardcoded for now, could be dynamic
     comparators = ["LIRAGLUTIDE", "DULAGLUTIDE", "TIRZEPATIDE", "EXENATIDE"]
     comparators = [c for c in comparators if c not in state["drug_names"]][:3]
 
+    # Include ML Memory context — prior run findings
+    memory_context = ""
+    past = state.get("past_findings", [])
+    if past and "error" not in past[0]:
+        prior = past[0].get("response", "")
+        if prior:
+            memory_context = f"\nPRIOR RUN FINDINGS (from ML Memory):\n{prior[:400]}\n"
+
     prompt = (
-        f"Investigate these novel safety signals for {drug}: {reactions_str}\n\n"
+        f"Investigate these novel safety signals for {drug}: {reactions_str}\n"
+        f"{memory_context}\n"
         f"For each signal:\n"
         f"1. Use get_prr to confirm the PRR\n"
         f"2. Use check_class_effect with comparators {comparators} "
-        f"to determine if it's class-wide or drug-specific\n"
-        f"3. If signal is strong and drug-specific, use get_signal_trend to see "
-        f"when it emerged\n\n"
-        f"Then classify each as: CLASS_EFFECT | DRUG_SPECIFIC | GROWING | DDI_SUSPECT\n"
+        f"(class-wide or drug-specific?)\n"
+        f"3. If drug-specific: use compare_time_periods with "
+        f"recent=2023-2026 vs baseline=2018-2022 (ISO format: YYYY-MM-DDT00:00:00.000Z) "
+        f"to see if it EMERGING or GROWING\n"
+        f"4. Use search_faers to check seriousness breakdown if signal is strong\n\n"
+        f"Classify each as: CLASS_EFFECT | DRUG_SPECIFIC | GROWING | EMERGING | STABLE\n"
+        f"Note if any signal matches a prior run finding (PERSISTENT).\n"
         f"Be concise. One classification per signal."
     )
 
@@ -499,19 +558,21 @@ def should_investigate(state: DrugSafetyState) -> str:
 def build_pipeline() -> StateGraph:
     graph = StateGraph(DrugSafetyState)
 
-    graph.add_node("resolve_names",  resolve_names)
-    graph.add_node("calculate_prr",  calculate_prr_signals)
-    graph.add_node("fetch_label",    fetch_label)
-    graph.add_node("search_lit",     search_lit)
-    graph.add_node("investigate",    investigate)
-    graph.add_node("write_report",   write_report)
-
+    graph.add_node("resolve_names",    resolve_names)
+    graph.add_node("load_memory",      load_memory)        # ML Memory: load prior findings
+    graph.add_node("calculate_prr",    calculate_prr_signals)
     graph.add_node("anomaly_detection", run_anomaly_detection)
+    graph.add_node("fetch_label",      fetch_label)
+    graph.add_node("search_lit",       search_lit)
+    graph.add_node("investigate",      investigate)
+    graph.add_node("write_report",     write_report)
+    graph.add_node("save_memory",      save_memory)        # ML Memory: persist findings
 
     graph.set_entry_point("resolve_names")
-    graph.add_edge("resolve_names",    "calculate_prr")
-    graph.add_edge("calculate_prr",    "anomaly_detection")
-    graph.add_edge("anomaly_detection", "fetch_label")
+    graph.add_edge("resolve_names",     "load_memory")      # load prior ML Memory
+    graph.add_edge("load_memory",       "calculate_prr")
+    graph.add_edge("calculate_prr",     "anomaly_detection")
+    graph.add_edge("anomaly_detection",  "fetch_label")
 
     # After label: search literature if strong unlabeled signals exist
     graph.add_conditional_edges(
@@ -528,7 +589,8 @@ def build_pipeline() -> StateGraph:
     )
 
     graph.add_edge("investigate",  "write_report")
-    graph.add_edge("write_report", END)
+    graph.add_edge("write_report", "save_memory")           # persist to ML Memory
+    graph.add_edge("save_memory",  END)
 
     return graph.compile()
 

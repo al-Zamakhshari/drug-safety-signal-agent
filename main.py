@@ -29,6 +29,7 @@ async def run(drug_name: str):
         "anomaly_signals": [],
         "label_text":      "",
         "literature":      [],
+        "past_findings":   [],
         "investigation":   [],
         "briefing":        "",
         "error":           None,
