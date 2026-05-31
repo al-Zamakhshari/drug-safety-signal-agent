@@ -84,7 +84,7 @@ def _quarter_to_date(q_str: str) -> str:
     )
 
 
-async def _get_quarterly_rates(client: AsyncOpenSearch, drug_names: list[str]) -> dict:
+async def _get_quarterly_rates(client, drug_names: list[str]) -> dict:
     """
     Returns {quarter_date_str: {reaction: rate, "__total__": count}}
     quarter_date_str is ISO format e.g. "2021-07-01"
