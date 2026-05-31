@@ -1,38 +1,25 @@
 """
 PRR (Proportional Reporting Ratio) calculation via OpenSearch aggregations.
 
-No LLM query generation — PRR is computed directly in Python using the
-opensearch-py client. This eliminates query syntax bugs and is fully
-reproducible across model versions.
+Formula: PRR = (drug_count / drug_total) / (non_drug_count / non_drug_total)
+         (textbook 2×2 contingency table — non-exposed denominator)
 
-Formula: PRR = (drug_count/drug_total) / (baseline/faers_total)
 EMA threshold: PRR >= 2.0 AND count >= 3
 
-Reference: EMA Guideline on the use of statistical signal detection
-methods in the EudraVigilance database (EMA/813938/2011)
+Baseline: fetched per-reaction via `filters` aggregation — not truncated to
+a global top-N. Rare/novel signals are never silently dropped.
+
+Reference: EMA/813938/2011 Guideline on statistical signal detection methods.
 """
 
 import os
 from typing import Any
-from opensearchpy import AsyncOpenSearch
+from agent.os_client import client as _client
 from dotenv import load_dotenv
 
 load_dotenv()
 
 INDEX = os.getenv("OPENSEARCH_INDEX", "faers_reports")
-
-
-def _client() -> AsyncOpenSearch:
-    return AsyncOpenSearch(
-        hosts=[os.getenv("OPENSEARCH_URL", "https://localhost:9200")],
-        http_auth=(
-            os.getenv("OPENSEARCH_USER", "admin"),
-            os.getenv("OPENSEARCH_PASSWORD", "Admin@changeme1"),
-        ),
-        use_ssl=True,
-        verify_certs=False,  # self-signed cert in local dev
-        ssl_show_warn=False,
-    )
 
 
 async def calculate_prr(
@@ -46,80 +33,84 @@ async def calculate_prr(
 
     Args:
         drug_names: List of drug name variants in ALL CAPS
-                    (e.g. ["SEMAGLUTIDE", "OZEMPIC", "WEGOVY"])
-        top_n:      Number of top reactions to consider for the drug
-        min_count:  Minimum reports to be considered a signal
-        min_prr:    Minimum PRR threshold (EMA standard: 2.0)
-
-    Returns:
-        dict with drug_total, faers_total, and signals list
+        top_n:      Number of top reactions to check for the drug
+        min_count:  Minimum drug reports (EMA: n >= 3)
+        min_prr:    Minimum PRR threshold (EMA: >= 2.0)
     """
     client = _client()
     try:
-        # Drug-specific reaction counts
+        # Step 1: drug total + top-N reactions
         drug_resp = await client.search(
             index=INDEX,
             body={
                 "size": 0,
-                "track_total_hits": True,   # bypass 10K cap
+                "track_total_hits": True,
                 "query": {"terms": {"drug_names": drug_names}},
-                "aggs": {
-                    "reactions": {
-                        "terms": {"field": "reactions", "size": top_n}
-                    }
-                },
+                "aggs": {"reactions": {"terms": {"field": "reactions", "size": top_n}}},
             },
         )
-        drug_total = drug_resp["hits"]["total"]["value"]
+        drug_total   = drug_resp["hits"]["total"]["value"]
+        drug_buckets = drug_resp["aggregations"]["reactions"]["buckets"]
 
-        # Population-wide baseline (all drugs, top 500 reactions)
-        baseline_resp = await client.search(
-            index=INDEX,
-            body={
-                "size": 0,
-                "track_total_hits": True,   # bypass 10K cap
-                "aggs": {
-                    "reactions": {
-                        "terms": {"field": "reactions", "size": 500}
+        # Step 2: FAERS total
+        faers_total = (await client.count(index=INDEX))["count"]
+
+        # Step 3: per-reaction baseline via filters agg — no rank truncation
+        reaction_keys = [b["key"] for b in drug_buckets]
+        baselines: dict[str, int] = {}
+        if reaction_keys:
+            base_resp = await client.search(
+                index=INDEX,
+                body={
+                    "size": 0,
+                    "aggs": {
+                        "per_reaction": {
+                            "filters": {
+                                "filters": {
+                                    rxn: {"term": {"reactions": rxn}}
+                                    for rxn in reaction_keys
+                                }
+                            }
+                        }
                     },
                 },
-            },
-        )
-        faers_total = baseline_resp["hits"]["total"]["value"]
+            )
+            baselines = {
+                rxn: bucket["doc_count"]
+                for rxn, bucket in
+                base_resp["aggregations"]["per_reaction"]["buckets"].items()
+            }
 
-        baselines = {
-            b["key"]: b["doc_count"]
-            for b in baseline_resp["aggregations"]["reactions"]["buckets"]
-        }
-
-        # Calculate PRR for each reaction
+        # Step 4: compute PRR using textbook 2×2 table
+        non_drug_total = faers_total - drug_total
         signals = []
-        for bucket in drug_resp["aggregations"]["reactions"]["buckets"]:
-            reaction = bucket["key"]
+        for bucket in drug_buckets:
+            reaction   = bucket["key"]
             drug_count = bucket["doc_count"]
-            baseline = baselines.get(reaction, 0)
+            baseline   = baselines.get(reaction, 0)
 
-            if baseline == 0 or drug_count < min_count:
+            if drug_count < min_count or baseline == 0:
                 continue
 
-            prr = (drug_count / drug_total) / (baseline / faers_total)
+            non_drug_count = baseline - drug_count
+            if non_drug_total <= 0 or non_drug_count <= 0:
+                continue
+
+            prr = (drug_count / drug_total) / (non_drug_count / non_drug_total)
             if prr >= min_prr:
-                signals.append(
-                    {
-                        "reaction": reaction,
-                        "prr": round(prr, 2),
-                        "drug_count": drug_count,
-                        "baseline": baseline,
-                    }
-                )
+                signals.append({
+                    "reaction":   reaction,
+                    "prr":        round(prr, 2),
+                    "drug_count": drug_count,
+                    "baseline":   baseline,
+                })
 
         signals.sort(key=lambda x: -x["prr"])
-
         return {
-            "drug_names": drug_names,
-            "drug_total": drug_total,
-            "faers_total": faers_total,
-            "signals": signals,
+            "drug_names":   drug_names,
+            "drug_total":   drug_total,
+            "faers_total":  faers_total,
+            "signals":      signals,
             "signal_count": len(signals),
         }
 
@@ -128,31 +119,18 @@ async def calculate_prr(
 
 
 async def get_drug_names(drug_name: str) -> dict[str, Any]:
-    """
-    Resolve a drug name to all FAERS variants using two-step lookup:
-    1. RxNorm API  → canonical generic + official brand names
-    2. FAERS index → any additional name variants actually in the data
-
-    Args:
-        drug_name: Generic or brand name (case-insensitive)
-    Returns:
-        dict with found_names list (ALL CAPS, as stored in FAERS)
-    """
+    """Resolve a drug name to all FAERS variants using RxNorm + fallback dict."""
     import httpx
 
     RXNORM = "https://rxnav.nlm.nih.gov/REST"
     all_names: set[str] = {drug_name.upper()}
 
-    # Step 1: RxNorm — get official brand names
     try:
         async with httpx.AsyncClient(timeout=10) as http:
-            # Resolve to ingredient RxCUI
             r = await http.get(f"{RXNORM}/rxcui.json",
                                params={"name": drug_name, "search": "1"})
             rxcui = r.json().get("idGroup", {}).get("rxnormId", [None])[0]
-
             if rxcui:
-                # Get brand names (BN tty)
                 r2 = await http.get(f"{RXNORM}/rxcui/{rxcui}/related.json",
                                     params={"tty": "BN"})
                 for grp in r2.json().get("relatedGroup", {}).get("conceptGroup", []):
@@ -161,49 +139,35 @@ async def get_drug_names(drug_name: str) -> dict[str, Any]:
                         if name and not any(c.isdigit() for c in name):
                             all_names.add(name)
     except Exception:
-        pass  # RxNorm unavailable — fall back to FAERS index lookup
+        pass
 
-    # Known fallbacks for withdrawn drugs not in RxNorm BN
     FALLBACKS = {
         "ROFECOXIB": ["VIOXX"], "CERIVASTATIN": ["BAYCOL"],
         "CISAPRIDE": ["PROPULSID"], "TERFENADINE": ["SELDANE"],
     }
     all_names.update(FALLBACKS.get(drug_name.upper(), []))
-
-    found = sorted(all_names)
-    return {"query": drug_name, "found_names": found}
+    return {"query": drug_name, "found_names": sorted(all_names)}
 
 
 async def get_signal_timeline(
     drug_names: list[str], reaction: str
 ) -> dict[str, Any]:
-    """
-    Get quarterly report counts for a drug+reaction pair over time.
-    Used to identify when a signal first emerged.
-    """
+    """Get quarterly report counts for a drug+reaction pair over time."""
     client = _client()
     try:
         resp = await client.search(
             index=INDEX,
             body={
                 "size": 0,
-                "query": {
-                    "bool": {
-                        "must": [
-                            {"terms": {"drug_names": drug_names}},
-                            {"term": {"reactions": reaction.upper()}},
-                        ]
-                    }
-                },
-                "aggs": {
-                    "by_quarter": {
-                        "date_histogram": {
-                            "field": "receipt_date",
-                            "calendar_interval": "quarter",
-                            "format": "yyyy-QQ",
-                        }
-                    }
-                },
+                "query": {"bool": {"must": [
+                    {"terms": {"drug_names": drug_names}},
+                    {"term":  {"reactions": reaction.upper()}},
+                ]}},
+                "aggs": {"by_quarter": {"date_histogram": {
+                    "field":             "receivedate",
+                    "calendar_interval": "quarter",
+                    "format":            "yyyy-QQQ",
+                }}},
             },
         )
         timeline = [

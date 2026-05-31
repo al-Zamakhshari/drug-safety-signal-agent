@@ -29,7 +29,7 @@ from agent.tools.openfda import get_drug_label
 from agent.tools.pubmed import search_literature
 from agent.tools.anomaly_signals import get_anomaly_signals
 from agent.tools.investigator_tools import (
-    get_prr, check_class_effect, check_ddi, get_signal_trend
+    get_prr, check_class_effect, get_signal_trend
 )
 
 load_dotenv()
@@ -58,7 +58,8 @@ def _model(max_tokens: int = 800) -> ChatOpenAI:
 
 _investigator_agent = create_react_agent(
     _model(max_tokens=1000),    # extra headroom for thinking + tool call JSON
-    tools=[get_prr, check_class_effect, check_ddi, get_signal_trend],
+    tools=[get_prr, check_class_effect, get_signal_trend],
+    # check_ddi removed — tool never invoked in prompt, metric was incorrect
 )
 
 
@@ -73,11 +74,45 @@ class DrugSafetyState(TypedDict):
     drug_total:         int
     faers_total:        int
     anomaly_signals:    list[dict]   # [{reaction, max_ratio, anomaly_grade}]
-    labeled_reactions:  list[str]
+    label_text:         str          # raw label text for token-overlap matching
     literature:         list[dict]
     investigation:      list[dict]
     briefing:           str
     error:              Optional[str]
+
+
+# ---------------------------------------------------------------------------
+# Label matching — token-overlap (no MedDRA ontology required)
+# ---------------------------------------------------------------------------
+_LABEL_STOP = {
+    "acute", "chronic", "disorder", "syndrome", "disease", "reaction",
+    "increased", "decreased", "abnormal", "nos", "unspecified", "type",
+    "associated", "related", "induced", "mediated", "and", "the", "with",
+    "due", "from", "that", "this", "following", "including", "severe",
+}
+
+def _label_tokens(term: str) -> set[str]:
+    """Extract significant tokens from a MedDRA PT or label text."""
+    return {
+        w for w in re.findall(r"[a-z]+", term.lower())
+        if len(w) > 3 and w not in _LABEL_STOP
+    }
+
+def _is_labeled(reaction: str, label_text: str) -> bool:
+    """
+    Returns True if the MedDRA PT is likely documented in the FDA label.
+
+    Matches by token overlap — handles:
+      - Word order differences: PT 'PANCREATITIS ACUTE' vs label 'acute pancreatitis'
+      - Case: MedDRA ALL CAPS vs sentence case in labels
+      - Partial matches: PT 'INTESTINAL OBSTRUCTION' matched by 'obstruction'
+
+    Falls back to substring match for single-token PTs.
+    """
+    toks = _label_tokens(reaction)
+    if not toks:
+        return reaction.lower() in label_text
+    return all(t in label_text for t in toks)
 
 
 # ---------------------------------------------------------------------------
@@ -118,20 +153,27 @@ async def run_anomaly_detection(state: DrugSafetyState) -> dict:
 
 
 async def fetch_label(state: DrugSafetyState) -> dict:
+    """
+    Fetch FDA label and store raw text for token-overlap matching.
+    Reads all sections including 'warnings' (not just warnings_and_cautions).
+    """
     label = await get_drug_label(state["drug_name"].lower())
-    reactions: list[str] = []
-    for section in ("boxed_warning", "warnings_and_cautions", "adverse_reactions"):
-        text = " ".join(label.get(section, []))
-        reactions.extend(re.findall(r'\b[A-Z][A-Z\s]{3,}\b', text.upper()))
-    reactions = list({r.strip() for r in reactions if 3 < len(r.strip()) < 60})
-    print(f"  [label]  {len(reactions)} labeled reactions")
-    return {"labeled_reactions": reactions}
+    # Concatenate all safety-relevant sections — lowercase for matching
+    label_text = " ".join(
+        " ".join(label.get(s, []))
+        for s in ("boxed_warning", "warnings", "warnings_and_cautions",
+                  "adverse_reactions", "contraindications",
+                  "warnings_and_precautions")
+    ).lower()
+    print(f"  [label]  {len(label_text):,} chars | "
+          f"found={label.get('found', False)} resolved_as={label.get('resolved_as','?')}")
+    return {"label_text": label_text}
 
 
 async def search_lit(state: DrugSafetyState) -> dict:
-    labeled = set(state.get("labeled_reactions", []))
+    label_text = state.get("label_text", "")
     # Top 3 unlabeled signals by PRR
-    targets = [s for s in state["prr_signals"] if s["reaction"] not in labeled][:3]
+    targets = [s for s in state["prr_signals"] if not _is_labeled(s["reaction"], label_text)][:3]
     literature = []
     for signal in targets:
         result = await search_literature(state["drug_name"], signal["reaction"])
@@ -157,11 +199,11 @@ async def investigate(state: DrugSafetyState) -> dict:
     Runs get_prr, check_class_effect, check_ddi, get_signal_trend autonomously.
     Returns structured classification for each investigated signal.
     """
-    labeled = set(state.get("labeled_reactions", []))
+    label_text = state.get("label_text", "")
     # Only investigate strong unlabeled signals (PRR≥5, n≥10)
     targets = [
         s for s in state["prr_signals"]
-        if s["reaction"] not in labeled
+        if not _is_labeled(s["reaction"], label_text)
         and s["prr"] >= 5.0
         and s["drug_count"] >= 10
     ][:3]
@@ -218,92 +260,125 @@ async def investigate(state: DrugSafetyState) -> dict:
 # Report writer — Gemma4 E4B formats everything into clinical prose
 # ---------------------------------------------------------------------------
 
+_VALID_RISK   = {"LOW", "MEDIUM", "HIGH"}
+_VALID_ACTION = {"MONITOR", "INVESTIGATE", "ESCALATE"}
+_DISCLAIMER   = "> Research only. Requires clinical validation before any regulatory action."
+
+
 async def write_report(state: DrugSafetyState) -> dict:
-    labeled = set(state.get("labeled_reactions", []))
-    lit_map = {l["signal"]: l for l in state.get("literature", [])}
+    """
+    Phase 3.1 fix: deterministic sections emitted by Python, LLM writes prose only.
+    Clinical numbers (PRR, counts) are never re-typed by the model.
+    """
+    label_text = state.get("label_text", "")
+    lit_map    = {l["signal"]: l for l in state.get("literature", [])}
+    drug       = state["drug_name"].upper()
 
-    # Build PRR table
-    rows = []
+    # ── Deterministic header (Python, not LLM) ──────────────────────────────
+    header = (
+        f"## Drug Safety Briefing: {drug}\n"
+        f"**FAERS reports analysed**: {state['drug_total']:,}  |  "
+        f"**Index**: {state['faers_total']:,}\n"
+    )
+
+    # ── Deterministic PRR table (Python, not LLM) ───────────────────────────
+    prr_rows = []
     for s in state["prr_signals"][:15]:
-        rxn = s["reaction"]
-        is_labeled = "Yes" if rxn in labeled else "**No ⚠️**"
-        papers = lit_map.get(rxn, {}).get("papers", "—")
-        rows.append(f"| {rxn} | {s['prr']} | {s['drug_count']} | {is_labeled} | {papers} |")
+        rxn        = s["reaction"]
+        is_labeled = "Yes" if _is_labeled(rxn, label_text) else "**No ⚠️**"
+        papers     = lit_map.get(rxn, {}).get("papers", "—")
+        prr_rows.append(
+            f"| {rxn} | {s['prr']} | {s['drug_count']} | {is_labeled} | {papers} |"
+        )
+    prr_block = (
+        "### PRR Signals (EMA standard: PRR ≥ 2.0)\n"
+        "| Reaction | PRR | Reports | In FDA Label? | Literature |\n"
+        "|----------|-----|---------|---------------|------------|\n"
+        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — |")
+    )
 
-    prr_table = "\n".join(rows) if rows else "| No signals | — | — | — | — |"
-
-    # Investigation findings (if any)
-    invest_section = ""
-    if state.get("investigation"):
-        inv = state["investigation"][0]
-        findings = inv.get("findings", "").strip()
-        tools_used = inv.get("tool_calls_made", 0)
-        signals_inv = inv.get("signals_investigated", [])
-        if findings and findings != "[Empty response from model]":
-            invest_section = (
-                f"\n\nINVESTIGATION ({tools_used} tool calls on {signals_inv}):\n"
-                f"{findings}\n"
-                f"Use this to fill the Investigation Results section."
-            )
-
-    # Build anomaly signals summary
-    anomaly_rows = ""
+    # ── Deterministic anomaly table (Python, not LLM) ───────────────────────
+    anomaly_rows = []
     for s in state.get("anomaly_signals", [])[:8]:
-        grade = f"{s['anomaly_grade']:.2f}" if s.get("anomaly_grade") else "pending"
-        anomaly_rows += f"| {s['reaction']} | {s['max_ratio']} | {s['max_count']} | {grade} |\n"
+        trend = s.get("trend", "—")
+        anomaly_rows.append(
+            f"| {s['reaction']} | {s['max_ratio']} | {s['max_count']} | {trend} |"
+        )
+    anomaly_block = (
+        "### Anomaly Detection (class_ratio vs drug class)\n"
+        "| Reaction | Max class_ratio | Count | Trend |\n"
+        "|----------|----------------|-------|-------|\n"
+        + ("\n".join(anomaly_rows) if anomaly_rows
+           else "| (run: uv run python -m ingestion.compute_class_ratio) | — | — | — |")
+    )
 
-    prompt = f"""Write a drug safety briefing for {state['drug_name'].upper()}.
+    # ── Investigation findings (structured, from investigate node) ───────────
+    invest_block = ""
+    if state.get("investigation"):
+        inv      = state["investigation"][0]
+        findings = inv.get("findings", "").strip()
+        n_tools  = inv.get("tool_calls_made", 0)
+        if findings and n_tools > 0:
+            invest_block = (
+                f"### Investigation Results ({n_tools} tool calls)\n"
+                f"{findings}\n"
+            )
+        elif findings:
+            invest_block = f"### Investigation Results\n{findings}\n"
 
-DATA:
-- Drug reports in FAERS: {state['drug_total']:,}
-- Total FAERS index: {state['faers_total']:,}
-- PRR signals (≥2.0): {len(state['prr_signals'])}
-- Anomaly signals (class_ratio): {len(state.get('anomaly_signals', []))}
-{invest_section}
+    # ── Ask LLM for narrative only — no numbers, no tables ─────────────────
+    # Feed structured JSON so the model doesn't need to re-parse the tables
+    signals_json = json.dumps([
+        {"reaction": s["reaction"], "prr": s["prr"],
+         "labeled": _is_labeled(s["reaction"], label_text),
+         "papers": lit_map.get(s["reaction"], {}).get("papers", 0)}
+        for s in state["prr_signals"][:10]
+    ], indent=2)
 
-PRR TABLE (pre-computed — copy into briefing):
-| Reaction | PRR | Reports | In FDA Label? | Literature |
-|----------|-----|---------|---------------|------------|
-{prr_table}
+    narrative_prompt = (
+        f"Write 2-3 Key Findings bullet points and a Risk/Action line for {drug}.\n\n"
+        f"PRR signals (pre-computed, do NOT repeat the numbers):\n{signals_json}\n\n"
+        f"Focus on: unlabeled signals (In FDA Label = false), signals with literature "
+        f"support, signals appearing in both PRR and anomaly detection.\n\n"
+        f"Format exactly:\n"
+        f"### Key Findings\n* bullet 1\n* bullet 2\n\n"
+        f"**Risk**: LOW/MEDIUM/HIGH\n"
+        f"**Action**: MONITOR/INVESTIGATE/ESCALATE"
+    )
 
-ANOMALY DETECTION (class_ratio vs comparator class — higher = drug-specific):
-| Reaction | Max class_ratio | Count | Anomaly grade |
-|----------|----------------|-------|---------------|
-{anomaly_rows if anomaly_rows else "| (detector still training) | — | — | — |"}
+    print(f"  [report] LLM narrative only (~{len(narrative_prompt)//4} tokens)...")
 
-WRITE THIS FORMAT:
-## Drug Safety Briefing: {state['drug_name'].upper()}
-**FAERS reports analysed**: {state['drug_total']:,}  |  **Index**: {state['faers_total']:,}
-
-### PRR Signals (EMA standard: PRR ≥ 2.0)
-[copy PRR table above]
-
-### Anomaly Detection (class_ratio vs drug class)
-[copy anomaly table above — note which reactions appear in BOTH PRR and AD]
-
-### Investigation Results
-[summarise investigation findings if available]
-
-### Key Findings
-2-3 bullets: highlight signals appearing in BOTH PRR AND anomaly detection (highest confidence).
-
-**Risk**: LOW/MEDIUM/HIGH
-**Action**: MONITOR/INVESTIGATE/ESCALATE
-
-> Research only. Requires clinical validation."""
-
-    print(f"  [report] writing briefing (~{len(prompt)//4} tokens)...")
-
+    narrative = ""
     try:
-        resp = await _model(max_tokens=2000).ainvoke(prompt)
-        briefing = resp.content or ""
-        if "<think>" in briefing:
-            briefing = briefing.split("</think>")[-1].strip()
-        if not briefing:
-            briefing = "[Empty response from model]"
+        resp = await _model(max_tokens=500).ainvoke(narrative_prompt)
+        narrative = resp.content or ""
+        if "<think>" in narrative:
+            narrative = narrative.split("</think>")[-1].strip()
     except Exception as e:
-        briefing = f"[Report generation failed: {e}]"
+        narrative = f"### Key Findings\n* Report generation error: {e}"
 
+    # Validate Risk/Action — derive from PRR if LLM output is garbled
+    if not narrative or "**Risk**" not in narrative:
+        top_prr = state["prr_signals"][0]["prr"] if state["prr_signals"] else 0
+        risk   = "HIGH" if top_prr >= 10 else "MEDIUM" if top_prr >= 5 else "LOW"
+        action = "ESCALATE" if top_prr >= 10 else "INVESTIGATE" if top_prr >= 5 else "MONITOR"
+        narrative = (
+            f"### Key Findings\n"
+            f"* {len([s for s in state['prr_signals'] if not _is_labeled(s['reaction'], label_text)])} "
+            f"unlabeled signals detected (PRR ≥ 2.0).\n"
+            f"* Top signal: {state['prr_signals'][0]['reaction'] if state['prr_signals'] else 'none'} "
+            f"(PRR={top_prr})\n\n"
+            f"**Risk**: {risk}\n**Action**: {action}"
+        )
+
+    # ── Assemble final briefing deterministically ────────────────────────────
+    sections = [header, prr_block, anomaly_block]
+    if invest_block:
+        sections.append(invest_block)
+    sections.append(narrative)
+    sections.append(_DISCLAIMER)
+
+    briefing = "\n\n".join(sections)
     return {"briefing": briefing}
 
 
@@ -312,8 +387,8 @@ WRITE THIS FORMAT:
 # ---------------------------------------------------------------------------
 
 def should_search_literature(state: DrugSafetyState) -> str:
-    labeled = set(state.get("labeled_reactions", []))
-    unlabeled = [s for s in state["prr_signals"] if s["reaction"] not in labeled]
+    label_text = state.get("label_text", "")
+    unlabeled = [s for s in state["prr_signals"] if not _is_labeled(s["reaction"], label_text)]
     needs_lit = unlabeled and any(s["prr"] >= 3.0 and s["drug_count"] >= 10 for s in unlabeled)
     result = "search_lit" if needs_lit else "investigate"
     print(f"  [route]  {len(unlabeled)} unlabeled → {result}")
@@ -321,10 +396,10 @@ def should_search_literature(state: DrugSafetyState) -> str:
 
 
 def should_investigate(state: DrugSafetyState) -> str:
-    labeled = set(state.get("labeled_reactions", []))
+    label_text = state.get("label_text", "")
     strong_unlabeled = [
         s for s in state["prr_signals"]
-        if s["reaction"] not in labeled
+        if not _is_labeled(s["reaction"], label_text)
         and s["prr"] >= 5.0
         and s["drug_count"] >= 10
     ]

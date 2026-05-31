@@ -13,7 +13,8 @@ Usage:
 """
 
 import asyncio, os
-from opensearchpy import AsyncOpenSearch, helpers
+from opensearchpy import helpers
+from agent.os_client import client as _client
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -75,7 +76,6 @@ def _quarter_to_date(q_str: str) -> str:
         return None
 
 
-def _client() -> AsyncOpenSearch:
     return AsyncOpenSearch(
         hosts=[os.getenv("OPENSEARCH_URL", "https://localhost:9200")],
         http_auth=(os.getenv("OPENSEARCH_USER", "admin"),
@@ -159,18 +159,24 @@ async def compute_and_index(drug_key: str, group: dict) -> int:
                 if rxn == "__total__":
                     continue
 
-                # Mean rate across comparator groups for this reaction+quarter
-                comp_vals = [
-                    grp.get(q_date, {}).get(rxn, 0)
-                    for grp in comp_group_rates
-                    if q_date in grp
-                ]
-                comp_vals = [v for v in comp_vals if v > 0]
-                if not comp_vals:
+                # Mean rate across ALL active comparator groups for this quarter.
+                # Missing reaction in a group = rate 0.0 (not dropped).
+                # Dropping zeros was the old bug: it inflated class_rate and
+                # excluded reactions absent from all comparators (the most
+                # drug-specific signals — exactly what we want to detect).
+                active_groups = [g for g in comp_group_rates if q_date in g]
+                if not active_groups:
                     continue
 
-                class_rate  = sum(comp_vals) / len(comp_vals)
-                class_ratio = round(drug_rate / class_rate, 4) if class_rate > 0 else 0
+                comp_vals   = [g[q_date].get(rxn, 0.0) for g in active_groups]
+                class_rate  = sum(comp_vals) / len(active_groups)
+
+                if class_rate > 0:
+                    class_ratio = round(drug_rate / class_rate, 4)
+                else:
+                    # Reaction absent from entire drug class → strong drug-specific
+                    # signal. Cap at 999 instead of divide-by-zero.
+                    class_ratio = 999.0
                 drug_count  = int(drug_rate * drug_total)
 
                 if drug_count < 3:

@@ -21,17 +21,17 @@ async def run(drug_name: str):
     print("─" * 60)
 
     initial_state: DrugSafetyState = {
-        "drug_name":         drug_name,
-        "drug_names":        [],
-        "prr_signals":       [],
-        "drug_total":        0,
-        "faers_total":       0,
-        "anomaly_signals":   [],
-        "labeled_reactions": [],
-        "literature":        [],
-        "investigation":     [],
-        "briefing":          "",
-        "error":             None,
+        "drug_name":       drug_name,
+        "drug_names":      [],
+        "prr_signals":     [],
+        "drug_total":      0,
+        "faers_total":     0,
+        "anomaly_signals": [],
+        "label_text":      "",
+        "literature":      [],
+        "investigation":   [],
+        "briefing":        "",
+        "error":           None,
     }
 
     final_state = await pipeline.ainvoke(initial_state)
