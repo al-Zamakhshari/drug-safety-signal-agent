@@ -4,8 +4,9 @@ version = "0.1.0"
 description = "Local drug safety signal detection using OpenSearch + Gemma4"
 requires-python = ">=3.11"
 dependencies = [
-    # Google ADK — multi-agent framework
-    "google-adk>=1.0.0",
+    # LangGraph — agent pipeline framework (MIT)
+    "langgraph>=1.2.2",
+    "langchain-core>=1.4.0",
     # OpenSearch client (Apache 2.0, ES-compatible API)
     "opensearch-py[async]>=2.7.0",
     # HTTP client for openFDA + PubMed
@@ -17,6 +18,8 @@ dependencies = [
     "openinference-instrumentation-litellm>=0.1.0",
     # Utilities
     "python-dotenv>=1.0.0",
+    "langgraph>=1.2.2",
+    "langchain-core>=1.4.0",
 ]
 
 [build-system]

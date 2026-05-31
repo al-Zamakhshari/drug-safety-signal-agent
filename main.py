@@ -1,7 +1,12 @@
-"""Entry point — analyze drug safety signals locally."""
+"""Entry point — analyze drug safety signals locally.
+
+Uses LangGraph pipeline:
+  resolve_names → calculate_prr → fetch_label → [search_literature?] → write_report
+
+Python handles all data retrieval. LLM (Gemma4 E4B) only writes the final report.
+"""
 
 import asyncio
-import os
 import sys
 from dotenv import load_dotenv
 
@@ -9,32 +14,28 @@ load_dotenv()
 
 
 async def run(drug_name: str):
-    from google.adk.runners import Runner
-    from google.adk.sessions import InMemorySessionService
-    from google.genai.types import Content, Part
-    from agent.agent import root_agent, _tracing_active
-
-    session_service = InMemorySessionService()
-    session = await session_service.create_session(
-        app_name="drug_safety_agent", user_id="cli_user"
-    )
-    runner = Runner(
-        agent=root_agent,
-        app_name="drug_safety_agent",
-        session_service=session_service,
-    )
+    from agent.pipeline import pipeline, DrugSafetyState
+    from agent.agent import setup_tracing, _tracing_active
 
     print(f"\nAnalyzing safety signals for: {drug_name}")
-    print("─" * 60 + "\n")
+    print("─" * 60)
 
-    message = Content(parts=[Part(text=f"Analyze safety signals for: {drug_name}")])
-    async for event in runner.run_async(
-        user_id="cli_user", session_id=session.id, new_message=message
-    ):
-        if event.is_final_response() and event.content:
-            for part in event.content.parts:
-                if part.text and not getattr(part, "thought", False):
-                    print(part.text, flush=True)
+    initial_state: DrugSafetyState = {
+        "drug_name":         drug_name,
+        "drug_names":        [],
+        "prr_signals":       [],
+        "drug_total":        0,
+        "faers_total":       0,
+        "labeled_reactions": [],
+        "literature":        [],
+        "briefing":          "",
+        "error":             None,
+    }
+
+    final_state = await pipeline.ainvoke(initial_state)
+
+    print("\n" + "─" * 60)
+    print(final_state["briefing"])
 
     if _tracing_active:
         _tracing_active.force_flush()
