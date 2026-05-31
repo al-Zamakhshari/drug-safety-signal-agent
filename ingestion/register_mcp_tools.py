@@ -20,33 +20,67 @@ AUTH = (os.getenv("OPENSEARCH_USER", "admin"),
 HDR  = {"Content-Type": "application/json"}
 
 TOOLS = [
+    # ── Already registered (idempotent — skipped if exists) ──────────────
     {
         "type": "DataDistributionTool",
         "name": "analyze_reaction_distribution",
         "description": (
-            "Analyzes how reaction distribution in FAERS changed between two time periods. "
+            "Analyzes how FAERS reaction distribution changed between two time periods. "
             "Returns divergence score and top changed reactions. "
             "Use to identify EMERGING (absent in baseline) vs GROWING (increased) signals. "
             "Required: selectionTimeRangeStart/End, baselineTimeRangeStart/End "
-            "(ISO format: YYYY-MM-DDT00:00:00.000Z)"
+            "(format: yyyy-MM-dd HH:mm:ss)"
         ),
-        "attributes": {
-            "index": "faers_reports",
-            "timeField": "receivedate",
-        },
+        "attributes": {"index": "faers_reports", "timeField": "receivedate"},
     },
     {
         "type": "SearchIndexTool",
         "name": "search_faers",
         "description": (
             "Search FAERS adverse event reports using OpenSearch DSL. "
-            "Investigate drug-reaction signals by demographics, seriousness, "
-            "country, reporter type, or any combination. "
+            "Investigate drug-reaction by demographics, seriousness, country, reporter type. "
             "Required: query (OpenSearch DSL JSON string)"
         ),
+        "attributes": {"index": "faers_reports", "size": 20},
+    },
+
+    # ── New: Anomaly Detection tools ──────────────────────────────────────
+    {
+        "type": "SearchAnomalyDetectorsTool",
+        "name": "list_anomaly_detectors",
+        "description": (
+            "List all anomaly detectors in OpenSearch. Use to find the "
+            "drug_class_ratio_detector ID for querying class-ratio anomaly results. "
+            "No required parameters."
+        ),
+        "attributes": {},
+    },
+    {
+        "type": "SearchAnomalyResultsTool",
+        "name": "get_anomaly_results",
+        "description": (
+            "Query anomaly detection results from a specific detector. "
+            "Use after list_anomaly_detectors to get the detector ID. "
+            "Returns anomaly grades (0-1) and confidence scores per time period. "
+            "Optional: detectorId, anomalyGradeThreshold, dataStartTime, dataEndTime, size."
+        ),
+        "attributes": {},
+    },
+
+    # ── New: Narrative pattern analysis ──────────────────────────────────
+    {
+        "type": "LogPatternAnalysisTool",
+        "name": "analyze_narrative_patterns",
+        "description": (
+            "Finds anomalous patterns in FAERS adverse event narratives. "
+            "Compares narrative text patterns between two time periods — "
+            "identifies new symptom descriptions or unusual report clusters. "
+            "Required: logFieldName='narrative', selectionTimeRangeStart/End. "
+            "Optional: baseTimeRangeStart/End for comparison."
+        ),
         "attributes": {
-            "index": "faers_reports",
-            "size":  20,
+            "index":     "faers_reports",
+            "timeField": "receivedate",
         },
     },
 ]
