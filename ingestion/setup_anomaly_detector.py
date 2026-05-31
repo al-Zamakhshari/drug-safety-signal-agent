@@ -1,9 +1,10 @@
 """
-Set up OpenSearch Anomaly Detection for drug safety signals.
+Set up OpenSearch Anomaly Detection on the class_ratio time series.
 
-OpenSearch uses Random Cut Forest (RCF) — same family as Elastic ML.
-This creates a detector that flags when a drug's reaction rate
-deviates from the population baseline.
+Mirrors the hackathon's Elastic ML job:
+  - Detector: high_mean(class_ratio) partitioned by reaction, over drug
+  - Weekly buckets (OpenSearch max: 10080 minutes = 7 days)
+  - Runs historical analysis on faers_ml_rates index
 
 Usage:
     uv run python -m ingestion.setup_anomaly_detector
@@ -15,128 +16,138 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENSEARCH_URL  = os.getenv("OPENSEARCH_URL", "https://localhost:9200")
-OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "admin")
-OPENSEARCH_PASS = os.getenv("OPENSEARCH_PASSWORD", "Pharma@2024!")
-INDEX           = os.getenv("OPENSEARCH_INDEX", "faers_reports")
-DETECTOR_NAME   = "drug_reaction_anomaly_detector"
+BASE     = os.getenv("OPENSEARCH_URL", "https://localhost:9200")
+USER     = os.getenv("OPENSEARCH_USER", "admin")
+PASS     = os.getenv("OPENSEARCH_PASSWORD", "Pharma@2024!")
+DETECTOR = "drug_class_ratio_detector"
 
-# Drugs to monitor (same comparator class as hackathon ML job)
-MONITORED_DRUGS = [
-    "SEMAGLUTIDE", "LIRAGLUTIDE", "DULAGLUTIDE",
-    "EMPAGLIFLOZIN", "DAPAGLIFLOZIN", "SITAGLIPTIN", "METFORMIN",
-]
+
+async def delete_old_detectors(client: httpx.AsyncClient, auth):
+    """Remove old detectors to start fresh."""
+    r = await client.post(
+        f"{BASE}/_plugins/_anomaly_detection/detectors/_search",
+        auth=auth, headers={"Content-Type": "application/json"},
+        json={"query": {"match_all": {}}}
+    )
+    for hit in r.json().get("hits", {}).get("hits", []):
+        did = hit["_id"]
+        name = hit["_source"].get("name", "")
+        # Stop then delete
+        await client.post(
+            f"{BASE}/_plugins/_anomaly_detection/detectors/{did}/_stop",
+            auth=auth, headers={"Content-Type": "application/json"}
+        )
+        dr = await client.delete(
+            f"{BASE}/_plugins/_anomaly_detection/detectors/{did}",
+            auth=auth
+        )
+        print(f"  Deleted detector: {name} ({did}) → {dr.status_code}")
 
 
 async def create_detector():
-    """
-    Create an OpenSearch anomaly detector for drug reaction rates.
-
-    Uses category_field (partition by drug_name) so one detector
-    monitors all drugs simultaneously — same concept as Elastic ML
-    partition_field.
-    """
-    auth = (OPENSEARCH_USER, OPENSEARCH_PASS)
+    auth = (USER, PASS)
     headers = {"Content-Type": "application/json"}
-    base = OPENSEARCH_URL
 
     async with httpx.AsyncClient(verify=False, timeout=30) as client:
-        # Check if detector already exists
-        r = await client.post(
-            f"{base}/_plugins/_anomaly_detection/detectors/_search",
-            auth=auth, headers=headers,
-            json={"query": {"term": {"name.keyword": DETECTOR_NAME}}}
-        )
-        if r.status_code == 200 and r.json().get("hits", {}).get("total", {}).get("value", 0) > 0:
-            detector_id = r.json()["hits"]["hits"][0]["_id"]
-            print(f"Detector already exists: {detector_id}")
-            return detector_id
+        print("Cleaning up old detectors...")
+        await delete_old_detectors(client, auth)
 
-        # Detector config — monitors report counts per drug per reaction
-        # RCF will learn the baseline pattern and flag deviations
-        detector_config = {
-            "name": DETECTOR_NAME,
-            "description": "Detect anomalous drug-reaction reporting rates (pharmacovigilance)",
-            "time_field": "receivedate",
-            "indices": [INDEX],
-            "feature_attributes": [
-                {
-                    "feature_name": "report_count",
-                    "feature_enabled": True,
-                    "aggregation_query": {
-                        "report_count": {"value_count": {"field": "safetyreportid"}}
-                    }
+        # Create detector on class_ratio index
+        # category_field partitions by (drug, reaction) — one RCF model per pair
+        config = {
+            "name": DETECTOR,
+            "description": "Detect anomalous class_ratio (drug vs comparator class rate)",
+            "time_field":  "quarter",
+            "indices":     ["faers_ml_rates"],
+            "feature_attributes": [{
+                "feature_name":    "class_ratio",
+                "feature_enabled": True,
+                "aggregation_query": {
+                    "class_ratio": {"avg": {"field": "class_ratio"}}
                 }
-            ],
-            # Partition by drug — one model per drug (like Elastic ML partition_field)
-            "category_field": ["drug_names"],
-            # OpenSearch AD only supports MINUTES. Use 10080 = 7 days (max allowed).
-            # Weekly buckets on monthly FAERS data gives good anomaly resolution.
+            }],
+            # Partition by reaction+drug pair: one model per combination
+            "category_field": ["drug", "reaction"],
+            # 10080 min = 7 days (max supported by OpenSearch AD)
             "detection_interval": {"period": {"interval": 10080, "unit": "MINUTES"}},
-            "window_delay":        {"period": {"interval": 1440, "unit": "MINUTES"}},
-            # Filter to monitored drugs only
+            "window_delay":       {"period": {"interval": 1440,  "unit": "MINUTES"}},
+            "shingle_size": 8,  # look back 8 windows (8 quarters) for pattern
             "filter_query": {
-                "terms": {"drug_names": MONITORED_DRUGS}
-            },
-            "shingle_size": 8,  # RCF uses last 8 months as context window
+                "range": {"class_ratio": {"gte": 0.01}}  # exclude near-zero
+            }
         }
 
         r = await client.post(
-            f"{base}/_plugins/_anomaly_detection/detectors",
-            auth=auth, headers=headers, json=detector_config
+            f"{BASE}/_plugins/_anomaly_detection/detectors",
+            auth=auth, headers=headers, json=config
         )
         if r.status_code not in (200, 201):
-            print(f"Error creating detector: {r.status_code} {r.text}")
+            print(f"Error: {r.status_code} {r.text[:200]}")
             return None
 
         detector_id = r.json()["_id"]
         print(f"✅ Created detector: {detector_id}")
 
-        # Start the detector (historical analysis)
-        r = await client.post(
-            f"{base}/_plugins/_anomaly_detection/detectors/{detector_id}/_start",
+        # Start historical analysis
+        r2 = await client.post(
+            f"{BASE}/_plugins/_anomaly_detection/detectors/{detector_id}/_start",
             auth=auth, headers=headers
         )
-        if r.status_code == 200:
-            print(f"✅ Detector started — historical analysis running in background")
-            print(f"   Monitor at: http://localhost:5601 → Anomaly Detection")
-        else:
-            print(f"Start response: {r.status_code} {r.text}")
-
+        print(f"✅ Started historical analysis: {r2.status_code}")
+        print(f"   Monitor at: http://localhost:5601 → Anomaly Detection")
+        print(f"   Detector ID: {detector_id}")
         return detector_id
 
 
-async def get_anomaly_results(detector_id: str, top_n: int = 20) -> list[dict]:
+async def get_top_anomalies(min_grade: float = 0.3, top_n: int = 20) -> list[dict]:
     """
-    Query anomaly results from a running detector.
-    Returns top anomalies sorted by anomaly_grade (0-1 scale).
+    Query anomaly results. Returns top anomalies sorted by anomaly_grade.
+    Run AFTER the detector has completed historical analysis (~few minutes).
     """
-    auth = (OPENSEARCH_USER, OPENSEARCH_PASS)
-    base = OPENSEARCH_URL
+    auth = (USER, PASS)
 
     async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        # Find detector ID
         r = await client.post(
-            f"{base}/_plugins/_anomaly_detection/detectors/{detector_id}/results/_search",
+            f"{BASE}/_plugins/_anomaly_detection/detectors/_search",
+            auth=auth, headers={"Content-Type": "application/json"},
+            json={"query": {"term": {"name.keyword": DETECTOR}}}
+        )
+        hits = r.json().get("hits", {}).get("hits", [])
+        if not hits:
+            print("Detector not found — run setup first")
+            return []
+
+        detector_id = hits[0]["_id"]
+
+        # Query results
+        r2 = await client.post(
+            f"{BASE}/_plugins/_anomaly_detection/detectors/{detector_id}/results/_search",
             auth=auth,
             headers={"Content-Type": "application/json"},
             json={
                 "size": top_n,
-                "query": {"range": {"anomaly_grade": {"gte": 0.3}}},
+                "query": {"range": {"anomaly_grade": {"gte": min_grade}}},
                 "sort": [{"anomaly_grade": "desc"}],
             }
         )
-        if r.status_code != 200:
+        if r2.status_code != 200:
+            print(f"Results query failed: {r2.status_code}")
             return []
 
         results = []
-        for hit in r.json().get("hits", {}).get("hits", []):
+        for hit in r2.json().get("hits", {}).get("hits", []):
             src = hit["_source"]
+            entities = {e["name"]: e["value"] for e in src.get("entity", [])}
             results.append({
-                "drug":          src.get("entity", [{}])[0].get("value", "UNKNOWN"),
-                "period":        src.get("data_start_time", ""),
+                "drug":          entities.get("drug", "UNKNOWN"),
+                "reaction":      entities.get("reaction", "UNKNOWN"),
+                "quarter":       src.get("data_start_time", ""),
                 "anomaly_grade": round(src.get("anomaly_grade", 0), 3),
                 "confidence":    round(src.get("confidence", 0), 3),
-                "count":         src.get("feature_data", [{}])[0].get("data", 0),
+                "class_ratio":   round(
+                    src.get("feature_data", [{}])[0].get("data", 0), 2
+                ),
             })
         return results
 

@@ -4,14 +4,13 @@ Drug Safety Signal Detection — LangGraph pipeline
 Node responsibilities:
   Python nodes  → all data retrieval and computation (deterministic)
   Gemma4 E4B   → two roles:
-    1. investigator_node: function calling — decides which tools to call,
-       detects class effects / DDI / temporal trends for novel signals
-    2. write_report: formats structured findings into clinical prose
+    1. investigator_node: function calling — detects class effects / DDI / trends
+    2. write_report: formats all findings into clinical prose
 
 Graph:
-  resolve_names → calculate_prr → fetch_label
+  resolve_names → calculate_prr → anomaly_detection → fetch_label
        → [search_literature?]
-       → [investigator?]        ← NEW: fires for PRR≥5 unlabeled signals
+       → [investigator?]
        → write_report
 """
 
@@ -28,6 +27,7 @@ from langchain_openai import ChatOpenAI
 from agent.tools.prr import calculate_prr, get_drug_names
 from agent.tools.openfda import get_drug_label
 from agent.tools.pubmed import search_literature
+from agent.tools.anomaly_signals import get_anomaly_signals
 from agent.tools.investigator_tools import (
     get_prr, check_class_effect, check_ddi, get_signal_trend
 )
@@ -71,9 +71,10 @@ class DrugSafetyState(TypedDict):
     prr_signals:        list[dict]   # [{reaction, prr, drug_count}]
     drug_total:         int
     faers_total:        int
+    anomaly_signals:    list[dict]   # [{reaction, max_ratio, anomaly_grade}]
     labeled_reactions:  list[str]
     literature:         list[dict]
-    investigation:      list[dict]   # [{signal, classification, evidence}]
+    investigation:      list[dict]
     briefing:           str
     error:              Optional[str]
 
@@ -99,6 +100,20 @@ async def calculate_prr_signals(state: DrugSafetyState) -> dict:
         "drug_total":  result["drug_total"],
         "faers_total": result["faers_total"],
     }
+
+
+async def run_anomaly_detection(state: DrugSafetyState) -> dict:
+    """Query OpenSearch AD for class_ratio anomalies. Pure Python — no LLM."""
+    # Use canonical drug name (as indexed in faers_ml_rates), not brand names
+    drug = state["drug_name"].upper()
+    result = await get_anomaly_signals(drug, min_ratio=2.0, min_count=5, top_n=15)
+    signals = result.get("signals", [])
+    state_info = result.get("detector_state", "UNKNOWN")
+    print(f"  [AD]     {len(signals)} anomaly signals | detector: {state_info}")
+    if signals:
+        top3 = [(s["reaction"], s["max_ratio"]) for s in signals[:3]]
+        print(f"           top: {top3}")
+    return {"anomaly_signals": signals}
 
 
 async def fetch_label(state: DrugSafetyState) -> dict:
@@ -230,12 +245,19 @@ async def write_report(state: DrugSafetyState) -> dict:
                 f"Use this to fill the Investigation Results section."
             )
 
+    # Build anomaly signals summary
+    anomaly_rows = ""
+    for s in state.get("anomaly_signals", [])[:8]:
+        grade = f"{s['anomaly_grade']:.2f}" if s.get("anomaly_grade") else "pending"
+        anomaly_rows += f"| {s['reaction']} | {s['max_ratio']} | {s['max_count']} | {grade} |\n"
+
     prompt = f"""Write a drug safety briefing for {state['drug_name'].upper()}.
 
 DATA:
 - Drug reports in FAERS: {state['drug_total']:,}
 - Total FAERS index: {state['faers_total']:,}
-- Signals detected (PRR≥2): {len(state['prr_signals'])}
+- PRR signals (≥2.0): {len(state['prr_signals'])}
+- Anomaly signals (class_ratio): {len(state.get('anomaly_signals', []))}
 {invest_section}
 
 PRR TABLE (pre-computed — copy into briefing):
@@ -243,18 +265,26 @@ PRR TABLE (pre-computed — copy into briefing):
 |----------|-----|---------|---------------|------------|
 {prr_table}
 
+ANOMALY DETECTION (class_ratio vs comparator class — higher = drug-specific):
+| Reaction | Max class_ratio | Count | Anomaly grade |
+|----------|----------------|-------|---------------|
+{anomaly_rows if anomaly_rows else "| (detector still training) | — | — | — |"}
+
 WRITE THIS FORMAT:
 ## Drug Safety Briefing: {state['drug_name'].upper()}
 **FAERS reports analysed**: {state['drug_total']:,}  |  **Index**: {state['faers_total']:,}
 
-### Signals Detected (PRR ≥ 2.0)
-[copy table above]
+### PRR Signals (EMA standard: PRR ≥ 2.0)
+[copy PRR table above]
+
+### Anomaly Detection (class_ratio vs drug class)
+[copy anomaly table above — note which reactions appear in BOTH PRR and AD]
 
 ### Investigation Results
-[summarise investigation findings if available, else skip this section]
+[summarise investigation findings if available]
 
 ### Key Findings
-2-3 bullet points focusing on unlabeled signals.
+2-3 bullets: highlight signals appearing in BOTH PRR AND anomaly detection (highest confidence).
 
 **Risk**: LOW/MEDIUM/HIGH
 **Action**: MONITOR/INVESTIGATE/ESCALATE
@@ -316,9 +346,12 @@ def build_pipeline() -> StateGraph:
     graph.add_node("investigate",    investigate)
     graph.add_node("write_report",   write_report)
 
+    graph.add_node("anomaly_detection", run_anomaly_detection)
+
     graph.set_entry_point("resolve_names")
-    graph.add_edge("resolve_names", "calculate_prr")
-    graph.add_edge("calculate_prr", "fetch_label")
+    graph.add_edge("resolve_names",    "calculate_prr")
+    graph.add_edge("calculate_prr",    "anomaly_detection")
+    graph.add_edge("anomaly_detection", "fetch_label")
 
     # After label: search literature if strong unlabeled signals exist
     graph.add_conditional_edges(
