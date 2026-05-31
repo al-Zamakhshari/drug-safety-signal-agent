@@ -480,22 +480,50 @@ async def write_report(state: DrugSafetyState) -> dict:
         f"**Index**: {state['faers_total']:,}\n"
     )
 
-    # ── Deterministic PRR table (Python, not LLM) ───────────────────────────
+    # ── Parse investigation classifications for PRR table column ────────────
+    # Extract reaction → classification from 31B investigation text
+    # Patterns: CLASS_EFFECT, DRUG_SPECIFIC, GROWING, EMERGING, STABLE, PERSISTENT
+    inv_tags: dict[str, str] = {}
+    inv_badges: list[str] = []
+    inv_findings = ""
+    inv_tools = 0
+
+    if state.get("investigation"):
+        inv       = state["investigation"][0]
+        inv_findings = inv.get("findings", "").strip()
+        inv_tools = inv.get("tool_calls_made", 0)
+        signals_inv = inv.get("signals_investigated", [])
+
+        # Build per-reaction tag map from findings text
+        CLASS_TAGS = {"CLASS_EFFECT", "DRUG_SPECIFIC", "GROWING", "EMERGING",
+                      "STABLE", "PERSISTENT", "HYPOTHESIS"}
+        for rxn in signals_inv:
+            # Find the section for this reaction in the findings
+            rxn_idx = inv_findings.upper().find(rxn.upper())
+            if rxn_idx >= 0:
+                snippet = inv_findings[rxn_idx:rxn_idx + 400].upper()
+                found = [t for t in CLASS_TAGS if t in snippet]
+                if found:
+                    # Compact badge: top 2 tags
+                    inv_tags[rxn] = " ".join(f"`{t}`" for t in found[:2])
+                    inv_badges.append(f"**{rxn}**: {' · '.join(found[:2])}")
+
+    # ── Deterministic PRR table — now with Investigation column ─────────────
     prr_rows = []
     for s in state["prr_signals"][:15]:
         rxn        = s["reaction"]
         is_labeled = "Yes" if _is_labeled(rxn, label_text) else "**No ⚠️**"
         papers     = lit_map.get(rxn, {}).get("papers", "—")
-        # χ² significance badge: ✓ = EMA-standard (χ²≥4), ~ = weak but surfaced
-        sig = "✓" if s.get("significant", True) else "~"
+        sig        = "✓" if s.get("significant", True) else "~"
+        inv_col    = inv_tags.get(rxn, "—")
         prr_rows.append(
-            f"| {rxn} | {s['prr']} | {sig} | {s['drug_count']} | {is_labeled} | {papers} |"
+            f"| {rxn} | {s['prr']} | {sig} | {s['drug_count']} | {is_labeled} | {papers} | {inv_col} |"
         )
     prr_block = (
         "### PRR Signals (EMA standard: PRR ≥ 2.0, χ²≥4)\n"
-        "| Reaction | PRR | Sig | Reports | In FDA Label? | Literature |\n"
-        "|----------|-----|-----|---------|---------------|------------|\n"
-        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — |")
+        "| Reaction | PRR | Sig | Reports | In FDA Label? | Literature | Investigation |\n"
+        "|----------|-----|-----|---------|---------------|------------|---------------|\n"
+        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — | — |")
     )
 
     # ── Deterministic anomaly table (Python, not LLM) ───────────────────────
@@ -513,19 +541,19 @@ async def write_report(state: DrugSafetyState) -> dict:
            else "| (run: uv run python -m ingestion.compute_class_ratio) | — | — | — |")
     )
 
-    # ── Investigation findings (structured, from investigate node) ───────────
+    # ── Investigation badge summary — shown inline, details collapsible ──────
     invest_block = ""
-    if state.get("investigation"):
-        inv      = state["investigation"][0]
-        findings = inv.get("findings", "").strip()
-        n_tools  = inv.get("tool_calls_made", 0)
-        if findings and n_tools > 0:
-            invest_block = (
-                f"### Investigation Results ({n_tools} tool calls)\n"
-                f"{findings}\n"
-            )
-        elif findings:
-            invest_block = f"### Investigation Results\n{findings}\n"
+    if inv_findings and inv_tools > 0:
+        badge_line = "  ".join(inv_badges) if inv_badges else "See full details below"
+        invest_block = (
+            f"### 🔬 Investigation ({inv_tools} tool calls)\n"
+            f"{badge_line}\n\n"
+            f"<details>\n<summary>Full investigation details</summary>\n\n"
+            f"{inv_findings}\n\n"
+            f"</details>\n"
+        )
+    elif inv_findings:
+        invest_block = f"### 🔬 Investigation\n{inv_findings}\n"
 
     # ── Ask LLM for narrative only — no numbers, no tables ─────────────────
     # Feed structured JSON so the model doesn't need to re-parse the tables

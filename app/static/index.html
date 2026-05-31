@@ -304,10 +304,55 @@
   #briefing tr:last-child td { border-bottom: none; }
   #briefing tr:hover td { background: rgba(108,142,245,0.05); }
 
-  /* Signal badges */
-  #briefing td:nth-child(4),
-  #briefing td:nth-child(5) {
+  /* Signal badges — No ⚠️ yellow, Yes green */
+  #briefing td:nth-child(5) { font-weight: 600; }
+
+  /* <details> investigation collapse */
+  #briefing details {
+    background: rgba(108,142,245,0.06);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0;
+    margin: 8px 0 16px;
+  }
+  #briefing summary {
+    padding: 10px 16px;
+    cursor: pointer;
+    color: var(--accent);
+    font-size: 13px;
     font-weight: 600;
+    list-style: none;
+    user-select: none;
+  }
+  #briefing summary::-webkit-details-marker { display: none; }
+  #briefing summary::before { content: "▶  "; font-size: 10px; }
+  #briefing details[open] summary::before { content: "▼  "; }
+  #briefing details > *:not(summary) {
+    padding: 0 16px 16px;
+    border-top: 1px solid var(--border);
+    margin-top: 0;
+  }
+
+  /* Investigation badge line */
+  #briefing .inv-badge {
+    display: inline-block;
+    background: var(--accent-dim);
+    color: var(--accent);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-family: var(--mono);
+    margin: 0 2px;
+  }
+
+  /* code inline — used for `CLASS_EFFECT` tags */
+  #briefing code {
+    background: var(--accent-dim);
+    color: var(--accent);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
   }
 
   #briefing ul, #briefing ol {
@@ -488,17 +533,30 @@ function analyze() {
     rawBriefing = markdown;
     document.getElementById('output').style.display = 'block';
     document.getElementById('briefing').innerHTML = marked.parse(markdown);
-    // Colour the "No ⚠️" cells
+
+    // Colour table cells
     document.querySelectorAll('#briefing td').forEach(td => {
-      if (td.textContent.includes('No ⚠️')) {
-        td.style.color = '#facc15';
-      }
-      if (td.textContent === '✓') {
-        td.style.color = '#4ade80';
-      }
-      if (td.textContent === '~') {
-        td.style.color = '#94a3b8';
-      }
+      const txt = td.textContent.trim();
+      if (txt.includes('No ⚠️'))   td.style.color = '#facc15';
+      if (txt === '✓')             td.style.color = '#4ade80';
+      if (txt === '~')             td.style.color = '#94a3b8';
+      // Investigation column — colour classification tags
+      if (txt.includes('CLASS_EFFECT'))  td.style.color = '#94a3b8';
+      if (txt.includes('DRUG_SPECIFIC')) td.style.color = '#f87171';
+      if (txt.includes('GROWING'))       td.style.color = '#fb923c';
+      if (txt.includes('EMERGING'))      td.style.color = '#f59e0b';
+      if (txt.includes('PERSISTENT'))    td.style.color = '#a78bfa';
+    });
+
+    // Colour inline `code` tags in investigation section
+    document.querySelectorAll('#briefing code').forEach(code => {
+      const txt = code.textContent;
+      if (txt === 'CLASS_EFFECT')  code.style.color = '#94a3b8';
+      if (txt === 'DRUG_SPECIFIC') { code.style.color = '#f87171'; code.style.background = 'rgba(248,113,113,0.15)'; }
+      if (txt === 'GROWING')       { code.style.color = '#fb923c'; code.style.background = 'rgba(251,146,60,0.15)'; }
+      if (txt === 'EMERGING')      { code.style.color = '#f59e0b'; code.style.background = 'rgba(245,158,11,0.15)'; }
+      if (txt === 'STABLE')        code.style.color = '#6b7280';
+      if (txt === 'PERSISTENT')    { code.style.color = '#a78bfa'; code.style.background = 'rgba(167,139,250,0.15)'; }
     });
   });
 
