@@ -61,6 +61,7 @@ async def calculate_prr(
             index=INDEX,
             body={
                 "size": 0,
+                "track_total_hits": True,   # bypass 10K cap
                 "query": {"terms": {"drug_names": drug_names}},
                 "aggs": {
                     "reactions": {
@@ -76,11 +77,11 @@ async def calculate_prr(
             index=INDEX,
             body={
                 "size": 0,
+                "track_total_hits": True,   # bypass 10K cap
                 "aggs": {
                     "reactions": {
                         "terms": {"field": "reactions", "size": 500}
                     },
-                    "total": {"value_count": {"field": "primary_id"}},
                 },
             },
         )

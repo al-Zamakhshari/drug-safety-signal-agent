@@ -42,7 +42,7 @@ async def create_detector():
 
     async with httpx.AsyncClient(verify=False, timeout=30) as client:
         # Check if detector already exists
-        r = await client.get(
+        r = await client.post(
             f"{base}/_plugins/_anomaly_detection/detectors/_search",
             auth=auth, headers=headers,
             json={"query": {"term": {"name.keyword": DETECTOR_NAME}}}
@@ -70,8 +70,10 @@ async def create_detector():
             ],
             # Partition by drug — one model per drug (like Elastic ML partition_field)
             "category_field": ["drug_names"],
-            "detection_interval": {"period": {"interval": 1, "unit": "MONTHS"}},
-            "window_delay":        {"period": {"interval": 1, "unit": "DAYS"}},
+            # OpenSearch AD only supports MINUTES. Use 10080 = 7 days (max allowed).
+            # Weekly buckets on monthly FAERS data gives good anomaly resolution.
+            "detection_interval": {"period": {"interval": 10080, "unit": "MINUTES"}},
+            "window_delay":        {"period": {"interval": 1440, "unit": "MINUTES"}},
             # Filter to monitored drugs only
             "filter_query": {
                 "terms": {"drug_names": MONITORED_DRUGS}

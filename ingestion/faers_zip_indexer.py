@@ -19,10 +19,16 @@ load_dotenv()
 
 # Default drug list for pharmacovigilance studies
 DEFAULT_DRUGS = {
-    # GLP-1 / diabetes class (primary focus)
-    "SEMAGLUTIDE", "LIRAGLUTIDE", "DULAGLUTIDE", "EXENATIDE",
-    "TIRZEPATIDE", "EMPAGLIFLOZIN", "DAPAGLIFLOZIN", "SITAGLIPTIN",
-    "METFORMIN",
+    # GLP-1 / diabetes class — generics AND brand names (FAERS uses both)
+    "SEMAGLUTIDE", "OZEMPIC", "WEGOVY", "RYBELSUS",   # semaglutide brands
+    "LIRAGLUTIDE", "VICTOZA", "SAXENDA",               # liraglutide brands
+    "DULAGLUTIDE", "TRULICITY",
+    "TIRZEPATIDE", "MOUNJARO", "ZEPBOUND",
+    "EXENATIDE", "BYETTA", "BYDUREON",
+    "EMPAGLIFLOZIN", "JARDIANCE",
+    "DAPAGLIFLOZIN", "FARXIGA",
+    "SITAGLIPTIN", "JANUVIA",
+    "METFORMIN", "GLUCOPHAGE",
     # COX-2 / NSAIDs (retrospective validation)
     "ROFECOXIB", "CELECOXIB", "IBUPROFEN", "NAPROXEN",
     # Common baseline drugs (improves PRR denominator)
