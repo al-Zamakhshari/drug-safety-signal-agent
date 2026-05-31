@@ -88,7 +88,8 @@ def _parse_zip(zf: zipfile.ZipFile, target_drugs: set[str]) -> list[dict]:
     if drug_df is None:
         return []
 
-    pid_col  = _col(drug_df, "primaryid", "caseid") or "primaryid"
+    # Pre-2012 AERS: primary key is "isr" not "primaryid"
+    pid_col  = _col(drug_df, "primaryid", "isr", "caseid") or "primaryid"
     name_col = _col(drug_df, "drugname") or "drugname"
 
     if name_col not in drug_df.columns or pid_col not in drug_df.columns:
@@ -118,7 +119,7 @@ def _parse_zip(zf: zipfile.ZipFile, target_drugs: set[str]) -> list[dict]:
     # ── REAC table ──────────────────────────────────────────────────────────
     reac_df = _read_df(zf, "REAC")
     if reac_df is not None:
-        rpid = _col(reac_df, "primaryid", "caseid") or "primaryid"
+        rpid = _col(reac_df, "primaryid", "isr", "caseid") or "primaryid"
         pt   = _col(reac_df, "pt") or "pt"
         if rpid in reac_df.columns and pt in reac_df.columns:
             reac_agg = (
@@ -140,18 +141,20 @@ def _parse_zip(zf: zipfile.ZipFile, target_drugs: set[str]) -> list[dict]:
     # ── DEMO table ──────────────────────────────────────────────────────────
     demo_df = _read_df(zf, "DEMO")
     if demo_df is not None:
-        dpid = _col(demo_df, "primaryid", "caseid") or "primaryid"
+        # Pre-2012 AERS: primary key is "isr" not "primaryid"
+        dpid = _col(demo_df, "primaryid", "isr", "caseid") or "primaryid"
         if dpid in demo_df.columns:
             # Select only columns we need — avoids joining massive wide table
             keep = {dpid}
             for alias, candidates in [
-                ("caseid",       ["caseid"]),
+                # FAERS (2012+) and AERS (2004-2011) field names
+                ("caseid",       ["caseid", "case"]),
                 ("fda_dt",       ["fda_dt", "event_dt"]),
                 ("serious",      ["serious"]),
                 ("age",          ["age"]),
-                ("sex",          ["sex", "gndr_cod"]),
-                ("occr_country", ["occr_country", "reporter_country"]),
-                ("rept_cod",     ["rept_cod"]),
+                ("sex",          ["sex", "gndr_cod"]),      # gndr_cod = pre-2012
+                ("occr_country", ["occr_country", "reporter_country", "to_mfr"]),
+                ("rept_cod",     ["rept_cod", "i_f_cod"]),  # i_f_cod = pre-2012
             ]:
                 found = _col(demo_df, *candidates)
                 if found:
