@@ -93,6 +93,41 @@ class DrugSafetyState(TypedDict):
 # Label matching — negation-aware, direction-aware (no MedDRA ontology)
 # ---------------------------------------------------------------------------
 
+# Synonyms: expand label text before matching so vocabulary differences between
+# MedDRA PTs and FDA label prose don't create false-novel flags.
+# e.g. MedDRA "IMPAIRED GASTRIC EMPTYING" vs label "delays gastric emptying"
+_SYNONYMS: dict[str, str] = {
+    # Morphological + vocabulary variants for gastric-emptying / motility
+    "impaired":      "impaired delayed delays delay slowed slowing",
+    "delayed":       "delayed delay delays impaired slowed",
+    "delay":         "delay delayed delays impaired slowed",
+    "delays":        "delays delay delayed impaired slowed",
+    "slowed":        "slowed slow slowing delayed impaired",
+    # Direction synonyms
+    "reduced":       "reduced decreased decrease lowered diminished",
+    "decreased":     "decreased reduced decrease lowered diminished",
+    "increased":     "increased elevated elevation raised higher",
+    "elevated":      "elevated increased raised higher elevation",
+    # Clinical synonym pairs
+    "injury":        "injury damage",
+    "failure":       "failure insufficiency",
+    "insufficiency": "insufficiency failure",
+    "obstruction":   "obstruction blockage",
+    "haemorrhage":   "haemorrhage hemorrhage bleeding",
+    "hemorrhage":    "hemorrhage haemorrhage bleeding",
+}
+
+def _expand_label(text: str) -> str:
+    """Add synonym variants so vocabulary drift between MedDRA and label prose doesn't hide matches."""
+    words = text.split()
+    out = []
+    for w in words:
+        out.append(w)
+        if w in _SYNONYMS:
+            out.append(_SYNONYMS[w])
+    return " ".join(out)
+
+
 # Stop words stripped from PT before matching — direction words NOT here
 _LABEL_STOP = {
     "acute", "chronic", "disorder", "syndrome", "disease", "reaction",
@@ -160,14 +195,17 @@ def _is_labeled(reaction: str, label_text: str) -> bool:
         key = re.sub(r"[^a-z ]+", " ", reaction.lower()).strip()
         return bool(key) and key in label_text
 
-    # Fast-fail: required token absent from entire label
-    if not clin.issubset(set(re.findall(r"[a-z]+", label_text))):
+    # Expand label text with synonyms before matching
+    expanded = _expand_label(label_text)
+
+    # Fast-fail: required token absent from entire expanded label
+    if not clin.issubset(set(re.findall(r"[a-z]+", expanded))):
         return False
 
     direction = _reaction_direction(reaction)
 
     # Process sentence-by-sentence — negation scope is contained to one sentence
-    for sentence in re.split(r"[.!?;\n]+", label_text):
+    for sentence in re.split(r"[.!?;\n]+", expanded):
         words    = re.findall(r"[a-z]+", sentence)
         word_set = set(words)
 
@@ -265,8 +303,7 @@ async def run_anomaly_detection(state: DrugSafetyState) -> dict:
     drug = state["drug_name"].upper()
     result = await get_anomaly_signals(drug, min_ratio=2.0, min_count=5, top_n=15)
     signals = result.get("signals", [])
-    state_info = result.get("detector_state", "UNKNOWN")
-    print(f"  [AD]     {len(signals)} anomaly signals | detector: {state_info}")
+    print(f"  [AD]     {len(signals)} anomaly signals")
     if signals:
         top3 = [(s["reaction"], s["max_ratio"]) for s in signals[:3]]
         print(f"           top: {top3}")
@@ -283,8 +320,8 @@ async def fetch_label(state: DrugSafetyState) -> dict:
     label_text = " ".join(
         " ".join(label.get(s, []))
         for s in ("boxed_warning", "warnings", "warnings_and_cautions",
-                  "adverse_reactions", "contraindications",
-                  "warnings_and_precautions")
+                  "warnings_and_precautions",   # both keys (openFDA uses both)
+                  "adverse_reactions", "contraindications")
     ).lower()
     print(f"  [label]  {len(label_text):,} chars | "
           f"found={label.get('found', False)} resolved_as={label.get('resolved_as','?')}")
