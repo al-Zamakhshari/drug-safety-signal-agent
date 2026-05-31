@@ -360,7 +360,7 @@ async def search_faers(
     query_description: Annotated[str, "Plain English description of what you're looking for"],
     drug: Annotated[str, "Drug name in ALL CAPS"],
     reaction: Annotated[str, "MedDRA reaction term in ALL CAPS (optional, use empty string if not filtering)"] = "",
-    filters: Annotated[dict, "Optional OpenSearch DSL filter dict (e.g. {'term': {'serious': '1'}})"] = None,
+    filters: Annotated[str, "Optional JSON filter string e.g. '{\"term\":{\"serious\":\"1\"}}' (leave empty for no filter)"] = "",
     size: Annotated[int, "Number of results to return (max 20)"] = 10,
 ) -> str:
     """
@@ -381,7 +381,11 @@ async def search_faers(
         if reaction:
             must_clauses.append({"term": {"reactions": reaction.upper()}})
         if filters:
-            must_clauses.append(filters)
+            import json as _json
+            try:
+                must_clauses.append(_json.loads(filters))
+            except Exception:
+                pass  # ignore malformed filter JSON
 
         body = {
             "size": 0,

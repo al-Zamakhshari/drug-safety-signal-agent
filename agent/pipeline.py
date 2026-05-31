@@ -38,19 +38,40 @@ load_dotenv()
 
 LOCAL_MODEL_URL  = os.getenv("LOCAL_MODEL_URL", "http://localhost:12434/v1")
 LOCAL_MODEL_NAME = os.getenv("LOCAL_MODEL_NAME", "docker.io/ai/gemma4:E2B")
+GOOGLE_API_KEY   = os.getenv("GOOGLE_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Shared model — ChatOpenAI pointing at Docker Model Runner
 # ---------------------------------------------------------------------------
 
 def _model(max_tokens: int = 800) -> ChatOpenAI:
+    """Local Gemma4 via Docker Model Runner."""
     return ChatOpenAI(
         model=LOCAL_MODEL_NAME,
         base_url=LOCAL_MODEL_URL,
         api_key="docker",
         max_tokens=max_tokens,
-        temperature=0,          # deterministic — critical for reliable tool calling
+        temperature=0,
     )
+
+
+def _model_31b():
+    """
+    Gemma4 31B via Google AI Studio — used for the investigator when
+    GOOGLE_API_KEY is set. Much more reliable for multi-step tool calling
+    than E2B (4B → 31B active params). Falls back to local E2B if no key.
+    """
+    if not GOOGLE_API_KEY:
+        return _model(max_tokens=1000)
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model="gemma-4-31b-it",
+            google_api_key=GOOGLE_API_KEY,
+            temperature=0,
+        )
+    except ImportError:
+        return _model(max_tokens=1000)
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +80,7 @@ def _model(max_tokens: int = 800) -> ChatOpenAI:
 # ---------------------------------------------------------------------------
 
 _investigator_agent = create_react_agent(
-    _model(max_tokens=1000),
+    _model_31b(),   # 31B via API if GOOGLE_API_KEY set, else local E2B
     tools=[
         get_prr,              # confirm PRR for a specific drug+reaction
         check_class_effect,   # is it class-wide or drug-specific?
@@ -387,15 +408,11 @@ async def investigate(state: DrugSafetyState) -> dict:
         f"Investigate these novel safety signals for {drug}: {reactions_str}\n"
         f"{memory_context}\n"
         f"For each signal:\n"
-        f"1. Use get_prr to confirm the PRR\n"
-        f"2. Use check_class_effect with comparators {comparators} "
-        f"(class-wide or drug-specific?)\n"
-        f"3. If drug-specific: use compare_time_periods with "
-        f"recent=2023-2026 vs baseline=2018-2022 (ISO format: YYYY-MM-DDT00:00:00.000Z) "
-        f"to see if it EMERGING or GROWING\n"
-        f"4. Use search_faers to check seriousness breakdown if signal is strong\n\n"
+        f"1. Call get_prr(drug='{drug}', reaction='<REACTION>') to confirm PRR\n"
+        f"2. Call check_class_effect(reaction='<REACTION>', comparator_drugs={comparators})\n"
+        f"3. If drug-specific and PRR>5: call get_signal_trend(drug='{drug}', reaction='<REACTION>')\n\n"
         f"Classify each as: CLASS_EFFECT | DRUG_SPECIFIC | GROWING | EMERGING | STABLE\n"
-        f"Note if any signal matches a prior run finding (PERSISTENT).\n"
+        f"{'Note if any signal matches prior findings (PERSISTENT).' if memory_context else ''}\n"
         f"Be concise. One classification per signal."
     )
 
@@ -404,9 +421,17 @@ async def investigate(state: DrugSafetyState) -> dict:
 
     result = await _investigator_agent.ainvoke({"messages": [("user", prompt)]})
 
-    # Extract final text response
+    # Extract final text response — Gemma4 31B returns list [{type:thinking},{type:text}]
     final_msg = result["messages"][-1]
-    investigation_text = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
+    raw_content = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
+    if isinstance(raw_content, list):
+        # Extract text parts only (skip thinking tokens)
+        investigation_text = " ".join(
+            p.get("text", "") for p in raw_content
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+    else:
+        investigation_text = str(raw_content)
 
     # Count tool calls made
     tool_calls = sum(
