@@ -82,37 +82,117 @@ class DrugSafetyState(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# Label matching — token-overlap (no MedDRA ontology required)
+# Label matching — negation-aware, direction-aware (no MedDRA ontology)
 # ---------------------------------------------------------------------------
+
+# Stop words stripped from PT before matching — direction words NOT here
 _LABEL_STOP = {
     "acute", "chronic", "disorder", "syndrome", "disease", "reaction",
-    "increased", "decreased", "abnormal", "nos", "unspecified", "type",
-    "associated", "related", "induced", "mediated", "and", "the", "with",
-    "due", "from", "that", "this", "following", "including", "severe",
+    "abnormal", "nos", "unspecified", "type", "associated", "related",
+    "induced", "mediated", "and", "the", "with", "due", "from", "that",
+    "this", "following", "including", "severe",
+    # deliberately NOT: increased, decreased, elevated, reduced — see _DIRECTION
 }
 
+# Direction families. A directional PT only matches if a word from the
+# SAME family appears near the clinical tokens — not the opposite.
+_DIRECTION: dict[str, set[str]] = {
+    "up":   {"increased", "increase", "elevated", "elevation", "high",
+             "raised", "hyper"},
+    "down": {"decreased", "decrease", "reduced", "reduction", "low",
+             "lowered", "hypo"},
+}
+_DIR_OPPOSITE = {"up": "down", "down": "up"}
+
+# Negation cues — if one precedes a clinical-token match, that occurrence
+# does not count as "labeled in the label"
+_NEGATION = {
+    "no", "not", "without", "absence", "absent", "denies", "denied",
+    "negative", "free", "ruled", "rule", "neither", "nor", "never",
+}
+_NEG_WINDOW = 5   # tokens of look-back for a negation cue
+
+
 def _label_tokens(term: str) -> set[str]:
-    """Extract significant tokens from a MedDRA PT or label text."""
+    """Significant clinical tokens from a MedDRA PT (no stop/direction words)."""
+    direction_words = _DIRECTION["up"] | _DIRECTION["down"]
     return {
         w for w in re.findall(r"[a-z]+", term.lower())
-        if len(w) > 3 and w not in _LABEL_STOP
+        if len(w) > 3 and w not in _LABEL_STOP and w not in direction_words
     }
+
+
+def _reaction_direction(reaction: str) -> str | None:
+    """Return 'up' or 'down' if the PT names a direction, else None."""
+    words = set(re.findall(r"[a-z]+", reaction.lower()))
+    for fam, members in _DIRECTION.items():
+        if words & members:
+            return fam
+    return None
+
 
 def _is_labeled(reaction: str, label_text: str) -> bool:
     """
-    Returns True if the MedDRA PT is likely documented in the FDA label.
+    True if the MedDRA PT is documented (non-negated, direction-consistent)
+    in the FDA label text.
 
-    Matches by token overlap — handles:
-      - Word order differences: PT 'PANCREATITIS ACUTE' vs label 'acute pancreatitis'
-      - Case: MedDRA ALL CAPS vs sentence case in labels
-      - Partial matches: PT 'INTESTINAL OBSTRUCTION' matched by 'obstruction'
+    Improvements over plain token overlap:
+      - Negation-aware: 'no evidence of pancreatitis' → False
+      - Direction-aware: 'BLOOD GLUCOSE DECREASED' is not matched by a label
+        that only says 'blood glucose increased'
+      - Word-order independent: 'PANCREATITIS ACUTE' matches 'acute pancreatitis'
 
-    Falls back to substring match for single-token PTs.
+    No external data / no API calls — pure string matching.
     """
-    toks = _label_tokens(reaction)
-    if not toks:
-        return reaction.lower() in label_text
-    return all(t in label_text for t in toks)
+    clin = _label_tokens(reaction)
+    label_words = re.findall(r"[a-z]+", label_text)
+
+    # Single/no-clinical-token PTs: substring + basic negation check
+    if not clin:
+        key = re.sub(r"[^a-z ]+", " ", reaction.lower()).strip()
+        if not key or key not in label_text:
+            return False
+        clin = set(key.split())
+
+    label_set = set(label_words)
+    # Fast-fail: if any clinical token is absent from the whole label, done
+    if not clin.issubset(label_set):
+        return False
+
+    direction = _reaction_direction(reaction)
+    n = len(label_words)
+    window = max(len(clin) + 4, 8)
+
+    # Scan for a window where ALL clinical tokens co-occur,
+    # with no preceding negation and direction-consistent context
+    for i, word in enumerate(label_words):
+        if word not in clin:
+            continue
+        lo = max(0, i - window)
+        hi = min(n, i + window + 1)
+        win_words = label_words[lo:hi]
+        win_set   = set(win_words)
+
+        if not clin.issubset(win_set):
+            continue  # tokens too far apart
+
+        # Negation check: look back before this window
+        neg_lo = max(0, lo - _NEG_WINDOW)
+        if _NEGATION & set(label_words[neg_lo:i]):
+            continue  # negated occurrence — keep scanning
+
+        # Direction check: PT names a direction but window has the opposite
+        if direction:
+            same_dir = bool(win_set & _DIRECTION[direction])
+            opp_dir  = bool(win_set & _DIRECTION[_DIR_OPPOSITE[direction]])
+            if not same_dir:
+                continue  # no matching direction in this window
+            if opp_dir and not same_dir:
+                continue  # opposite direction dominates
+
+        return True  # clean, non-negated, direction-consistent hit
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -287,14 +367,16 @@ async def write_report(state: DrugSafetyState) -> dict:
         rxn        = s["reaction"]
         is_labeled = "Yes" if _is_labeled(rxn, label_text) else "**No ⚠️**"
         papers     = lit_map.get(rxn, {}).get("papers", "—")
+        # χ² significance badge: ✓ = EMA-standard (χ²≥4), ~ = weak but surfaced
+        sig = "✓" if s.get("significant", True) else "~"
         prr_rows.append(
-            f"| {rxn} | {s['prr']} | {s['drug_count']} | {is_labeled} | {papers} |"
+            f"| {rxn} | {s['prr']} | {sig} | {s['drug_count']} | {is_labeled} | {papers} |"
         )
     prr_block = (
-        "### PRR Signals (EMA standard: PRR ≥ 2.0)\n"
-        "| Reaction | PRR | Reports | In FDA Label? | Literature |\n"
-        "|----------|-----|---------|---------------|------------|\n"
-        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — |")
+        "### PRR Signals (EMA standard: PRR ≥ 2.0, χ²≥4)\n"
+        "| Reaction | PRR | Sig | Reports | In FDA Label? | Literature |\n"
+        "|----------|-----|-----|---------|---------------|------------|\n"
+        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — |")
     )
 
     # ── Deterministic anomaly table (Python, not LLM) ───────────────────────

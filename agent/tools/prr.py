@@ -22,6 +22,27 @@ load_dotenv()
 INDEX = os.getenv("OPENSEARCH_INDEX", "faers_reports")
 
 
+def _yates_chi2(a: int, b: int, c: int, d: int) -> float:
+    """
+    Yates continuity-corrected Pearson χ² for a 2×2 contingency table.
+
+        χ² = N · (|ad − bc| − N/2)² / ((a+b)(c+d)(a+c)(b+d))
+
+    Yates correction is used (vs uncorrected Pearson) because PRR signals
+    are screened at small exposed-cell counts (n ≥ 3). Uncorrected χ²
+    over-rejects at small counts; Yates is conservative and matches the
+    EMA-style PRR threshold calibration (PRR≥2 / χ²≥4 / n≥3).
+    """
+    n = a + b + c + d
+    row1, row2 = a + b, c + d
+    col1, col2 = a + c, b + d
+    denom = row1 * row2 * col1 * col2
+    if denom == 0 or n == 0:
+        return 0.0
+    numer = n * (abs(a * d - b * c) - n / 2.0) ** 2
+    return numer / denom
+
+
 async def calculate_prr(
     drug_names: list[str],
     top_n: int = 50,
@@ -98,11 +119,22 @@ async def calculate_prr(
 
             prr = (drug_count / drug_total) / (non_drug_count / non_drug_total)
             if prr >= min_prr:
+                # Annotate with Yates χ² — do NOT filter on it.
+                # A PRR=15 on n=4 is statistically weak but clinically interesting;
+                # we surface it with significant=False for human triage.
+                chi2 = _yates_chi2(
+                    a=drug_count,
+                    b=drug_total - drug_count,
+                    c=non_drug_count,
+                    d=non_drug_total - non_drug_count,
+                )
                 signals.append({
-                    "reaction":   reaction,
-                    "prr":        round(prr, 2),
-                    "drug_count": drug_count,
-                    "baseline":   baseline,
+                    "reaction":    reaction,
+                    "prr":         round(prr, 2),
+                    "drug_count":  drug_count,
+                    "baseline":    baseline,
+                    "chi2":        round(chi2, 2),
+                    "significant": chi2 >= 4.0,   # EMA standard gate
                 })
 
         signals.sort(key=lambda x: -x["prr"])

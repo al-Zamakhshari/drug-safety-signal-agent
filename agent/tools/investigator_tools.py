@@ -44,12 +44,20 @@ async def _get_prr(drug_names: list[str], reaction: str) -> dict:
         if drug_total == 0 or baseline == 0 or faers_total == 0:
             return {"prr": 0, "drug_count": drug_count, "drug_total": drug_total}
 
-        prr = (drug_count / drug_total) / (baseline / faers_total)
+        # Textbook 2×2 contingency table — matches calculate_prr in prr.py exactly.
+        # Comparator arm is the NON-drug population, not the full population.
+        non_drug_total = faers_total - drug_total
+        non_drug_count = baseline - drug_count
+        if non_drug_total <= 0 or non_drug_count <= 0:
+            return {"prr": 0, "drug_count": drug_count, "drug_total": drug_total,
+                    "baseline": baseline, "faers_total": faers_total}
+
+        prr = (drug_count / drug_total) / (non_drug_count / non_drug_total)
         return {
-            "prr":        round(prr, 2),
-            "drug_count": drug_count,
-            "drug_total": drug_total,
-            "baseline":   baseline,
+            "prr":         round(prr, 2),
+            "drug_count":  drug_count,
+            "drug_total":  drug_total,
+            "baseline":    baseline,
             "faers_total": faers_total,
         }
     finally:
