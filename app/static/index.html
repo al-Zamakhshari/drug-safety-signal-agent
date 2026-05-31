@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drug Safety Signal Agent</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2d3148;
+    --accent: #6c8ef5;
+    --accent-dim: #3d4f8a;
+    --text: #e2e4ef;
+    --text-dim: #8b90a8;
+    --success: #4ade80;
+    --warning: #facc15;
+    --danger: #f87171;
+    --radius: 10px;
+    --font: 'Inter', system-ui, sans-serif;
+    --mono: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 20px 40px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--surface);
+  }
+
+  header .logo {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+
+  header .tagline {
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+
+  header .badge {
+    margin-left: auto;
+    background: var(--accent-dim);
+    color: var(--accent);
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  main {
+    flex: 1;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 40px 20px;
+    width: 100%;
+  }
+
+  /* Search bar */
+  .search-wrap {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 32px;
+  }
+
+  .search-wrap input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 20px;
+    color: var(--text);
+    font-size: 16px;
+    font-family: var(--font);
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .search-wrap input:focus {
+    border-color: var(--accent);
+  }
+
+  .search-wrap input::placeholder { color: var(--text-dim); }
+
+  .search-wrap button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: var(--radius);
+    padding: 14px 28px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+    white-space: nowrap;
+  }
+
+  .search-wrap button:hover { opacity: 0.85; }
+  .search-wrap button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Quick picks */
+  .quick-picks {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 32px;
+  }
+
+  .quick-picks span {
+    color: var(--text-dim);
+    font-size: 13px;
+    padding: 6px 0;
+  }
+
+  .quick-picks button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 20px;
+    padding: 5px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .quick-picks button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* Pipeline progress */
+  #progress {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 24px;
+    display: none;
+  }
+
+  #progress h3 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  .step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    opacity: 0.3;
+    transition: opacity 0.3s;
+  }
+
+  .step:last-child { border-bottom: none; }
+  .step.active  { opacity: 1; }
+  .step.done    { opacity: 0.7; }
+
+  .step-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .step.active .step-icon { border-color: var(--accent); animation: pulse 1.2s infinite; }
+  .step.done  .step-icon { background: var(--accent-dim); border-color: var(--accent); }
+
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(108,142,245,0.4); }
+    50%       { box-shadow: 0 0 0 6px rgba(108,142,245,0); }
+  }
+
+  .step-text { flex: 1; }
+  .step-label { font-size: 14px; }
+  .step-detail { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+  .step-check {
+    color: var(--success);
+    font-size: 16px;
+    display: none;
+  }
+
+  .step.done .step-check { display: block; }
+
+  /* Briefing output */
+  #output {
+    display: none;
+  }
+
+  #output .toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  #output h2 {
+    font-size: 15px;
+    color: var(--text-dim);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+
+  #output .copy-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  #output .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  #briefing {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px 32px;
+    line-height: 1.7;
+  }
+
+  /* Markdown styles */
+  #briefing h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+
+  #briefing h3 {
+    font-size: 15px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--accent);
+    margin: 24px 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  #briefing p {
+    color: var(--text-dim);
+    margin: 8px 0;
+    font-size: 14px;
+  }
+
+  #briefing strong { color: var(--text); }
+
+  #briefing table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+
+  #briefing th {
+    background: var(--bg);
+    padding: 8px 12px;
+    text-align: left;
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  #briefing td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  #briefing tr:last-child td { border-bottom: none; }
+  #briefing tr:hover td { background: rgba(108,142,245,0.05); }
+
+  /* Signal badges */
+  #briefing td:nth-child(4),
+  #briefing td:nth-child(5) {
+    font-weight: 600;
+  }
+
+  #briefing ul, #briefing ol {
+    padding-left: 20px;
+    margin: 8px 0;
+  }
+
+  #briefing li {
+    color: var(--text-dim);
+    font-size: 14px;
+    margin: 4px 0;
+  }
+
+  #briefing blockquote {
+    border-left: 3px solid var(--border);
+    padding-left: 16px;
+    color: var(--text-dim);
+    font-size: 13px;
+    margin: 16px 0;
+  }
+
+  #briefing code {
+    background: var(--bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  /* Error */
+  #error {
+    display: none;
+    background: rgba(248,113,113,0.1);
+    border: 1px solid rgba(248,113,113,0.3);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    color: var(--danger);
+    font-size: 14px;
+  }
+
+  footer {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-dim);
+    font-size: 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="logo">💊 Drug Safety Signal Agent</div>
+    <div class="tagline">Local pharmacovigilance · OpenSearch 3.6 · Gemma4 E2B</div>
+  </div>
+  <span class="badge">100% Local · No API Keys</span>
+</header>
+
+<main>
+  <!-- Search -->
+  <div class="search-wrap">
+    <input id="drugInput" type="text" placeholder="Enter drug name (e.g. semaglutide, rofecoxib, warfarin)…" />
+    <button id="analyzeBtn" onclick="analyze()">Analyze →</button>
+  </div>
+
+  <div class="quick-picks">
+    <span>Try:</span>
+    <button onclick="setDrug('semaglutide')">Semaglutide</button>
+    <button onclick="setDrug('rofecoxib')">Rofecoxib (Vioxx)</button>
+    <button onclick="setDrug('liraglutide')">Liraglutide</button>
+    <button onclick="setDrug('warfarin')">Warfarin</button>
+    <button onclick="setDrug('metformin')">Metformin</button>
+  </div>
+
+  <!-- Pipeline progress -->
+  <div id="progress">
+    <h3>Pipeline Progress</h3>
+    <div id="steps"></div>
+  </div>
+
+  <!-- Error -->
+  <div id="error"></div>
+
+  <!-- Final briefing -->
+  <div id="output">
+    <div class="toolbar">
+      <h2>Safety Briefing</h2>
+      <button class="copy-btn" onclick="copyBriefing()">Copy markdown</button>
+    </div>
+    <div id="briefing"></div>
+  </div>
+</main>
+
+<footer>
+  <a href="https://github.com/al-Zamakhshari/drug-safety-signal-agent" target="_blank">
+    Open source · Apache 2.0
+  </a>
+  &nbsp;·&nbsp; Research only · Requires clinical validation
+</footer>
+
+<script>
+const STEPS_CONFIG = [
+  { node: 'resolve_names',     emoji: '🔍', label: 'Resolving drug names' },
+  { node: 'load_memory',       emoji: '🧠', label: 'Loading ML Memory' },
+  { node: 'calculate_prr',     emoji: '📊', label: 'Calculating PRR signals' },
+  { node: 'anomaly_detection', emoji: '📈', label: 'Anomaly detection' },
+  { node: 'fetch_label',       emoji: '📋', label: 'Fetching FDA label' },
+  { node: 'search_lit',        emoji: '📚', label: 'PubMed literature search' },
+  { node: 'investigate',       emoji: '🔬', label: 'Investigating signals' },
+  { node: 'write_report',      emoji: '✍️',  label: 'Writing briefing' },
+  { node: 'save_memory',       emoji: '💾', label: 'Saving to ML Memory' },
+];
+
+let es = null;
+let rawBriefing = '';
+
+function setDrug(name) {
+  document.getElementById('drugInput').value = name;
+}
+
+function buildSteps() {
+  const container = document.getElementById('steps');
+  container.innerHTML = '';
+  STEPS_CONFIG.forEach(s => {
+    const div = document.createElement('div');
+    div.className = 'step';
+    div.id = `step-${s.node}`;
+    div.innerHTML = `
+      <div class="step-icon">${s.emoji}</div>
+      <div class="step-text">
+        <div class="step-label">${s.label}</div>
+        <div class="step-detail" id="detail-${s.node}"></div>
+      </div>
+      <div class="step-check">✓</div>`;
+    container.appendChild(div);
+  });
+}
+
+function analyze() {
+  const drug = document.getElementById('drugInput').value.trim();
+  if (!drug) return;
+
+  // Reset UI
+  if (es) es.close();
+  rawBriefing = '';
+  document.getElementById('output').style.display = 'none';
+  document.getElementById('error').style.display = 'none';
+  document.getElementById('briefing').innerHTML = '';
+  document.getElementById('progress').style.display = 'block';
+  document.getElementById('analyzeBtn').disabled = true;
+  buildSteps();
+
+  es = new EventSource(`/analyze?drug=${encodeURIComponent(drug)}`);
+
+  es.addEventListener('node_start', e => {
+    const { node } = JSON.parse(e.data);
+    const el = document.getElementById(`step-${node}`);
+    if (el) el.classList.add('active');
+  });
+
+  es.addEventListener('node_done', e => {
+    const { node, detail } = JSON.parse(e.data);
+    const el = document.getElementById(`step-${node}`);
+    if (el) {
+      el.classList.remove('active');
+      el.classList.add('done');
+      if (detail) {
+        document.getElementById(`detail-${node}`).textContent = detail;
+      }
+    }
+  });
+
+  es.addEventListener('briefing', e => {
+    const { markdown } = JSON.parse(e.data);
+    rawBriefing = markdown;
+    document.getElementById('output').style.display = 'block';
+    document.getElementById('briefing').innerHTML = marked.parse(markdown);
+    // Colour the "No ⚠️" cells
+    document.querySelectorAll('#briefing td').forEach(td => {
+      if (td.textContent.includes('No ⚠️')) {
+        td.style.color = '#facc15';
+      }
+      if (td.textContent === '✓') {
+        td.style.color = '#4ade80';
+      }
+      if (td.textContent === '~') {
+        td.style.color = '#94a3b8';
+      }
+    });
+  });
+
+  es.addEventListener('done', () => {
+    es.close();
+    document.getElementById('analyzeBtn').disabled = false;
+    document.getElementById('progress').style.display = 'none';
+  });
+
+  es.addEventListener('error', e => {
+    const errEl = document.getElementById('error');
+    try {
+      const { message } = JSON.parse(e.data);
+      errEl.textContent = `Error: ${message}`;
+    } catch {
+      errEl.textContent = 'Connection error. Is the server running?';
+    }
+    errEl.style.display = 'block';
+    document.getElementById('analyzeBtn').disabled = false;
+    es.close();
+  });
+
+  // Allow Enter key
+  document.getElementById('drugInput').onkeydown = e => {
+    if (e.key === 'Enter') analyze();
+  };
+}
+
+function copyBriefing() {
+  navigator.clipboard.writeText(rawBriefing).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy markdown', 2000);
+  });
+}
+
+// Enter key on input
+document.getElementById('drugInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') analyze();
+});
+</script>
+</body>
+</html>

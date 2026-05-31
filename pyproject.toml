@@ -22,6 +22,9 @@ dependencies = [
     "langchain-core>=1.4.0",
     "langchain-openai>=1.2.2",
     "polars>=1.41.2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
 ]
 
 [build-system]
@@ -29,7 +32,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["agent", "ingestion"]
+packages = ["agent", "ingestion", "app"]
 
 [dependency-groups]
 dev = [
