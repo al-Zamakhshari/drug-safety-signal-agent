@@ -62,13 +62,14 @@ def _model_31b():
     than E2B (4B → 31B active params). Falls back to local E2B if no key.
     """
     if not GOOGLE_API_KEY:
-        return _model(max_tokens=1000)
+        return _model(max_tokens=2000)
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
             model="gemma-4-31b-it",
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
+            max_tokens=3000,   # thinking + tool calls + synthesis need room
         )
     except ImportError:
         return _model(max_tokens=1000)
@@ -431,13 +432,23 @@ async def investigate(state: DrugSafetyState) -> dict:
     final_msg = result["messages"][-1]
     raw_content = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
     if isinstance(raw_content, list):
-        # Extract text parts only (skip thinking tokens)
-        investigation_text = " ".join(
-            p.get("text", "") for p in raw_content
-            if isinstance(p, dict) and p.get("type") == "text"
-        )
+        # Try text parts first
+        text_parts = [p.get("text", "") for p in raw_content
+                      if isinstance(p, dict) and p.get("type") == "text"]
+        investigation_text = " ".join(text_parts).strip()
+
+        # If text is empty (model ran out of tokens after thinking + tool calls),
+        # extract the conclusion from thinking tokens — they contain the actual reasoning
+        if not investigation_text:
+            thinking_parts = [p.get("thinking", p.get("text", ""))
+                              for p in raw_content
+                              if isinstance(p, dict) and p.get("type") == "thinking"]
+            if thinking_parts:
+                thinking = " ".join(thinking_parts)
+                # Take last 800 chars of thinking — that's the synthesis/conclusion
+                investigation_text = f"*(Extracted from model reasoning)*\n{thinking[-800:]}"
     else:
-        investigation_text = str(raw_content)
+        investigation_text = str(raw_content).strip()
 
     # Count tool calls made
     tool_calls = sum(
