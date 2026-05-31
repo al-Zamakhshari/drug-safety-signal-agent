@@ -12,7 +12,7 @@ services:
     image: opensearchproject/opensearch:2.19.1
     environment:
       - discovery.type=single-node
-      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD:-Admin@changeme1}
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD:-Pharma@2024!}
       - plugins.security.disabled=false
       - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
     ports:
@@ -20,7 +20,7 @@ services:
     volumes:
       - opensearch_data:/usr/share/opensearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf -u admin:${OPENSEARCH_PASSWORD:-Admin@changeme1} -k https://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf -u admin:${OPENSEARCH_PASSWORD:-Pharma@2024!} -k https://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 20
@@ -32,7 +32,7 @@ services:
     environment:
       - OPENSEARCH_HOSTS=["https://opensearch:9200"]
       - OPENSEARCH_USERNAME=admin
-      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Admin@changeme1}
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Pharma@2024!}
     depends_on:
       opensearch:
         condition: service_healthy
@@ -52,7 +52,7 @@ services:
     environment:
       - OPENSEARCH_URL=https://opensearch:9200
       - OPENSEARCH_USER=admin
-      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Admin@changeme1}
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Pharma@2024!}
       - PHOENIX_URL=http://phoenix:6006
       - LOCAL_MODEL_URL=http://model-runner.docker.internal/engines/llama.cpp/v1
     depends_on:
