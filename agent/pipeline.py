@@ -136,61 +136,53 @@ def _is_labeled(reaction: str, label_text: str) -> bool:
     True if the MedDRA PT is documented (non-negated, direction-consistent)
     in the FDA label text.
 
-    Improvements over plain token overlap:
-      - Negation-aware: 'no evidence of pancreatitis' → False
-      - Direction-aware: 'BLOOD GLUCOSE DECREASED' is not matched by a label
-        that only says 'blood glucose increased'
-      - Word-order independent: 'PANCREATITIS ACUTE' matches 'acute pancreatitis'
+    Sentence-aware: the label is split on sentence boundaries first, so a
+    negation in one sentence cannot reach across to invalidate a genuine
+    match in a later sentence.
 
-    No external data / no API calls — pure string matching.
+    Handles:
+      - Cross-sentence safety: 'no other findings. pancreatitis occurred.' → True
+      - Negation: 'no evidence of pancreatitis' → False
+      - Direction: 'BLOOD GLUCOSE DECREASED' rejected by 'increased'-only label
+      - Word order: 'PANCREATITIS ACUTE' matches 'acute pancreatitis'
     """
     clin = _label_tokens(reaction)
-    label_words = re.findall(r"[a-z]+", label_text)
 
-    # Single/no-clinical-token PTs: substring + basic negation check
     if not clin:
         key = re.sub(r"[^a-z ]+", " ", reaction.lower()).strip()
-        if not key or key not in label_text:
-            return False
-        clin = set(key.split())
+        return bool(key) and key in label_text
 
-    label_set = set(label_words)
-    # Fast-fail: if any clinical token is absent from the whole label, done
-    if not clin.issubset(label_set):
+    # Fast-fail: required token absent from entire label
+    if not clin.issubset(set(re.findall(r"[a-z]+", label_text))):
         return False
 
     direction = _reaction_direction(reaction)
-    n = len(label_words)
-    window = max(len(clin) + 4, 8)
 
-    # Scan for a window where ALL clinical tokens co-occur,
-    # with no preceding negation and direction-consistent context
-    for i, word in enumerate(label_words):
-        if word not in clin:
+    # Process sentence-by-sentence — negation scope is contained to one sentence
+    for sentence in re.split(r"[.!?;\n]+", label_text):
+        words    = re.findall(r"[a-z]+", sentence)
+        word_set = set(words)
+
+        if not clin.issubset(word_set):
+            continue  # not all clinical tokens in this sentence
+
+        # Negation check: look back _NEG_WINDOW tokens before the first
+        # clinical token found in this sentence
+        negated = False
+        for i, w in enumerate(words):
+            if w in clin:
+                neg_lo = max(0, i - _NEG_WINDOW)
+                if _NEGATION & set(words[neg_lo:i]):
+                    negated = True
+                break
+        if negated:
             continue
-        lo = max(0, i - window)
-        hi = min(n, i + window + 1)
-        win_words = label_words[lo:hi]
-        win_set   = set(win_words)
 
-        if not clin.issubset(win_set):
-            continue  # tokens too far apart
+        # Direction check: sentence must contain the correct direction
+        if direction and not (word_set & _DIRECTION[direction]):
+            continue
 
-        # Negation check: look back before this window
-        neg_lo = max(0, lo - _NEG_WINDOW)
-        if _NEGATION & set(label_words[neg_lo:i]):
-            continue  # negated occurrence — keep scanning
-
-        # Direction check: PT names a direction but window has the opposite
-        if direction:
-            same_dir = bool(win_set & _DIRECTION[direction])
-            opp_dir  = bool(win_set & _DIRECTION[_DIR_OPPOSITE[direction]])
-            if not same_dir:
-                continue  # no matching direction in this window
-            if opp_dir and not same_dir:
-                continue  # opposite direction dominates
-
-        return True  # clean, non-negated, direction-consistent hit
+        return True  # clean match in this sentence
 
     return False
 
@@ -471,22 +463,32 @@ async def write_report(state: DrugSafetyState) -> dict:
 def should_search_literature(state: DrugSafetyState) -> str:
     label_text = state.get("label_text", "")
     unlabeled = [s for s in state["prr_signals"] if not _is_labeled(s["reaction"], label_text)]
-    needs_lit = unlabeled and any(s["prr"] >= 3.0 and s["drug_count"] >= 10 for s in unlabeled)
+    # χ² significance gate: prefer statistically robust signals for literature search.
+    # If none pass χ²≥4, fall back to any unlabeled PRR≥3 signal (advisory mode).
+    sig_unlabeled = [s for s in unlabeled if s.get("significant", True)
+                     and s["prr"] >= 3.0 and s["drug_count"] >= 10]
+    weak_unlabeled = [s for s in unlabeled if not s.get("significant", True)
+                      and s["prr"] >= 3.0 and s["drug_count"] >= 10]
+    needs_lit = bool(sig_unlabeled) or bool(weak_unlabeled)
     result = "search_lit" if needs_lit else "investigate"
-    print(f"  [route]  {len(unlabeled)} unlabeled → {result}")
+    sig_count = len(sig_unlabeled)
+    print(f"  [route]  {len(unlabeled)} unlabeled ({sig_count} χ²-significant) → {result}")
     return result
 
 
 def should_investigate(state: DrugSafetyState) -> str:
     label_text = state.get("label_text", "")
+    # Gate investigation on χ²-significant signals only — weak signals surface
+    # in the table with '~' but don't trigger expensive LLM investigation.
     strong_unlabeled = [
         s for s in state["prr_signals"]
         if not _is_labeled(s["reaction"], label_text)
         and s["prr"] >= 5.0
         and s["drug_count"] >= 10
+        and s.get("significant", True)   # χ²≥4 gate
     ]
     result = "investigate" if strong_unlabeled else "write_report"
-    print(f"  [route]  {len(strong_unlabeled)} strong unlabeled → {result}")
+    print(f"  [route]  {len(strong_unlabeled)} strong χ²-significant unlabeled → {result}")
     return result
 
 

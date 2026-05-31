@@ -23,29 +23,47 @@ INDEX = os.getenv("OPENSEARCH_INDEX", "faers_reports")
 
 
 async def _get_prr(drug_names: list[str], reaction: str) -> dict:
-    """Helper: compute PRR for a specific drug+reaction pair."""
+    """
+    Compute PRR for a specific drug+reaction pair in one round-trip.
+
+    Uses a single query with two filter aggs:
+      - drug_rxn:  reports for this drug that have the reaction
+      - all_rxn:   all FAERS reports that have the reaction (baseline)
+    Plus track_total_hits for drug_total and a separate count for faers_total.
+    Saves one network round-trip vs the previous two-query implementation.
+    """
     client = _client()
     try:
-        drug_resp = await client.search(index=INDEX, body={
-            "size": 0, "track_total_hits": True,
-            "query": {"terms": {"drug_names": drug_names}},
-            "aggs": {"rxn": {"filter": {"term": {"reactions": reaction.upper()}}}},
-        })
-        drug_total = drug_resp["hits"]["total"]["value"]
-        drug_count = drug_resp["aggregations"]["rxn"]["doc_count"]
+        rxn_upper = reaction.upper()
 
-        base_resp = await client.search(index=INDEX, body={
-            "size": 0, "track_total_hits": True,
-            "aggs": {"rxn": {"filter": {"term": {"reactions": reaction.upper()}}}},
+        # Single query: drug filter gives drug_total + drug_count;
+        # global_rxn sub-agg gives baseline across all drugs.
+        resp = await client.search(index=INDEX, body={
+            "size": 0,
+            "track_total_hits": True,
+            "query": {"terms": {"drug_names": drug_names}},
+            "aggs": {
+                # Reaction count for this drug
+                "drug_rxn": {"filter": {"term": {"reactions": rxn_upper}}},
+                # Baseline: reaction across ALL drugs (global filter, no drug query)
+                "global_rxn": {
+                    "global": {},
+                    "aggs": {
+                        "rxn": {"filter": {"term": {"reactions": rxn_upper}}}
+                    }
+                },
+            },
         })
-        faers_total = base_resp["hits"]["total"]["value"]
-        baseline   = base_resp["aggregations"]["rxn"]["doc_count"]
+
+        drug_total  = resp["hits"]["total"]["value"]
+        drug_count  = resp["aggregations"]["drug_rxn"]["doc_count"]
+        faers_total = resp["aggregations"]["global_rxn"]["doc_count"]
+        baseline    = resp["aggregations"]["global_rxn"]["rxn"]["doc_count"]
 
         if drug_total == 0 or baseline == 0 or faers_total == 0:
             return {"prr": 0, "drug_count": drug_count, "drug_total": drug_total}
 
-        # Textbook 2×2 contingency table — matches calculate_prr in prr.py exactly.
-        # Comparator arm is the NON-drug population, not the full population.
+        # Textbook 2×2: comparator arm is the NON-drug population
         non_drug_total = faers_total - drug_total
         non_drug_count = baseline - drug_count
         if non_drug_total <= 0 or non_drug_count <= 0:
