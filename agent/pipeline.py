@@ -31,8 +31,8 @@ from agent.tools.anomaly_signals import get_anomaly_signals
 from agent.tools.signal_memory import save_finding, search_findings
 from agent.tools.investigator_tools import (
     get_prr, check_class_effect, get_signal_trend,
-    compare_time_periods, search_faers,
 )
+from agent.tools.opensearch_mcp import list_opensearch_tools, call_opensearch_tool
 
 load_dotenv()
 
@@ -82,11 +82,14 @@ def _model_31b():
 _investigator_agent = create_react_agent(
     _model_31b(),   # 31B via API if GOOGLE_API_KEY set, else local E2B
     tools=[
-        get_prr,              # confirm PRR for a specific drug+reaction
-        check_class_effect,   # is it class-wide or drug-specific?
-        get_signal_trend,     # GROWING / STABLE / EMERGING over time
-        compare_time_periods, # DataDistributionTool: baseline vs recent period
-        search_faers,         # flexible DSL: by sex, seriousness, country, etc.
+        # Statistical tools (direct Python → OpenSearch)
+        get_prr,                  # confirm PRR for a specific drug+reaction
+        check_class_effect,       # class-wide or drug-specific?
+        get_signal_trend,         # GROWING / STABLE / EMERGING over time
+        # Built-in OS MCP tools — agent discovers and uses freely
+        list_opensearch_tools,    # discover all registered OS MCP tools
+        call_opensearch_tool,     # call any registered OS MCP tool by name
+        # e.g. analyze_reaction_distribution, search_faers, future tools
     ],
 )
 
@@ -407,13 +410,16 @@ async def investigate(state: DrugSafetyState) -> dict:
     prompt = (
         f"Investigate these novel safety signals for {drug}: {reactions_str}\n"
         f"{memory_context}\n"
-        f"For each signal:\n"
-        f"1. Call get_prr(drug='{drug}', reaction='<REACTION>') to confirm PRR\n"
-        f"2. Call check_class_effect(reaction='<REACTION>', comparator_drugs={comparators})\n"
-        f"3. If drug-specific and PRR>5: call get_signal_trend(drug='{drug}', reaction='<REACTION>')\n\n"
+        f"You have access to OpenSearch ML tools. Start by calling list_opensearch_tools "
+        f"to discover available tools, then use them freely to investigate.\n\n"
+        f"Required steps for each signal:\n"
+        f"1. Call get_prr(drug='{drug}', reaction='<REACTION>') — confirm PRR\n"
+        f"2. Call check_class_effect(reaction='<REACTION>', comparator_drugs={comparators}) "
+        f"— class effect or drug-specific?\n"
+        f"3. Use call_opensearch_tool with analyze_reaction_distribution to compare "
+        f"recent (2023-2026) vs baseline (2018-2022) periods — is the signal growing?\n\n"
         f"Classify each as: CLASS_EFFECT | DRUG_SPECIFIC | GROWING | EMERGING | STABLE\n"
-        f"{'Note if any signal matches prior findings (PERSISTENT).' if memory_context else ''}\n"
-        f"Be concise. One classification per signal."
+        f"{'Note PERSISTENT if matches prior findings.' if memory_context else ''}"
     )
 
     print(f"  [invest] investigating {len(targets)} signals: "
