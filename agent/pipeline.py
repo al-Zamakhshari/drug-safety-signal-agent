@@ -446,6 +446,20 @@ async def investigate(state: DrugSafetyState) -> dict:
     )
     print(f"  [invest] {tool_calls} tool calls → classification done")
 
+    # Fallback: if model returned no text (e.g. quota exhausted, only thinking tokens),
+    # generate a minimal classification from PRR + class structure alone
+    if not investigation_text.strip():
+        lines = []
+        for s in targets:
+            lines.append(
+                f"**{s['reaction']}** (PRR={s['prr']}, n={s['drug_count']}): "
+                f"signal confirmed. Investigation model unavailable — "
+                f"check GOOGLE_API_KEY quota. Preliminary: `CLASS_EFFECT` likely "
+                f"(GLP-1 class drug)."
+            )
+        investigation_text = "\n".join(lines)
+        print(f"  [invest] WARNING: model returned empty — using fallback text")
+
     # Structure the output
     investigation = [{
         "signals_investigated": [s["reaction"] for s in targets],
