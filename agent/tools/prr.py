@@ -270,6 +270,16 @@ async def calculate_prr(
                 signals.append(t)
 
         signals.sort(key=lambda x: -x["prr"])
+
+        # Step 7: annotate with EBGM / EB05 (Gamma-Poisson Shrinker, DuMouchel 1999)
+        # Fit the GPS prior once across all signals for this drug.
+        # This is the industry-standard Bayesian shrinkage estimator used by FDA/WHO.
+        try:
+            from agent.tools.ebgm import annotate_signals_with_ebgm
+            signals = annotate_signals_with_ebgm(signals, drug_total, faers_total)
+        except Exception:
+            pass   # EBGM is supplemental — never block the main PRR result
+
         return {
             "drug_names":   drug_names,
             "drug_total":   drug_total,

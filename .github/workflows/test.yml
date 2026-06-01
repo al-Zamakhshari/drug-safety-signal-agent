@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Pure-function test suite
+    runs-on: ubuntu-latest
+    # Tests are pure-function (no OpenSearch, no Docker Model Runner needed).
+    # All statistical formulas (PRR, ROR, CI, BH-FDR, MH, EBGM) run without
+    # any external services — that's the point of keeping statistics in Python.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run tests
+        run: uv run pytest tests/ -v --tb=short
+
+      - name: Verify no schema drift in pipeline
+        # Smoke-import the pipeline so module-level crashes (wrong kwargs,
+        # missing fields) fail CI before they reach production.
+        run: uv run python -c "import agent.pipeline; import agent.tools.prr; import agent.tools.anomaly_signals; print('imports OK')"

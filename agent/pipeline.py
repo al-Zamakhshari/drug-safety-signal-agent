@@ -753,17 +753,21 @@ async def write_report(state: DrugSafetyState) -> dict:
         ror_ci_col = (f"{s.get('ror_lower','?')}–{s.get('ror_upper','?')}"
                       if s.get("ror_lower") is not None else "—")
         q_col      = str(s.get("q_value", "—"))
+        ebgm_col   = str(s.get("ebgm", "—"))
+        eb05_col   = str(s.get("eb05", "—"))
+        eb05_flag  = "✓" if s.get("eb05_signal") else ("~" if s.get("eb05") else "—")
         inv_col    = inv_tags.get(rxn, "—")
         prr_rows.append(
             f"| {rxn} | {s['prr']} ({prr_ci_col}) | {ror_col} ({ror_ci_col}) | "
+            f"{ebgm_col} / {eb05_col} {eb05_flag} | "
             f"{chi2_badge}{robust_col}{fdr_col} | "
             f"{s['drug_count']} | {is_labeled} | {papers} | {inv_col} |"
         )
     prr_block = (
-        "### PRR + ROR Signals (EMA standard: PRR/ROR ≥ 2.0, χ²≥4, 95% CI lower > 1, BH q < 0.05)\n"
-        "| Reaction | PRR (95% CI) | ROR (95% CI) | χ²/CI/FDR | Reports | In FDA Label? | Lit | Investigation |\n"
-        "|----------|-------------|-------------|-----------|---------|---------------|-----|---------------|\n"
-        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — | — | — |")
+        "### PRR + ROR + EBGM Signals (EMA/FDA standards)\n"
+        "| Reaction | PRR (95% CI) | ROR (95% CI) | EBGM / EB05 | χ²/CI/FDR | Reports | In FDA Label? | Lit | Investigation |\n"
+        "|----------|-------------|-------------|-------------|-----------|---------|---------------|-----|---------------|\n"
+        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — | — | — | — |")
     )
 
     # ── Deterministic within-class disproportionality table (Python, not LLM) ─

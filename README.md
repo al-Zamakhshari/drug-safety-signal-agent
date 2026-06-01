@@ -23,8 +23,8 @@ Detects drug safety signals from FDA FAERS adverse event reports using a fully l
 
 | Stage | Method | Technology |
 |-------|--------|-----------|
-| Signal detection | PRR + 95% CI + BH-FDR | OpenSearch aggregations |
-| Within-class comparison | Pooled rate ratio + 95% CI vs therapeutic class | OpenSearch faers_ml_rates |
+| Signal detection | PRR + ROR + 95% CI + BH-FDR + EBGM/EB05 | OpenSearch aggregations |
+| Within-class comparison | Mantel–Haenszel stratified rate ratio + CI vs therapeutic class | OpenSearch faers_ml_rates |
 | Label cross-reference | MedDRA LLT-expanded, negation-aware token-overlap | openFDA API |
 | Literature evidence | PubMed search | NCBI eUtils |
 | Investigation | Function calling — class effect / trend / DDI | Qwen3.5-9B |
@@ -230,13 +230,13 @@ This tool is a **PRR + within-class disproportionality screener**. It is compara
 
 | Limitation | Impact |
 |------------|--------|
-| **No Bayesian shrinkage** (BCPNN/EBGM) | PRR point estimates at low n are noisy; the 95% CI lower bound mitigates this but does not eliminate it |
+| **No BCPNN** (Bayesian Confidence Propagation Neural Network) | EBGM/EB05 (DuMouchel GPS) is now implemented. BCPNN is an alternative Bayesian approach used by WHO Uppsala — not yet implemented. |
 | **No stratification** (age / sex / reporter type) | Simpson's paradox confounding is unaddressed |
 | **No exposure normalisation** | PRR measures reporting rate, not incidence. Market exposure differences between drugs are not controlled. |
 | **FAERS structural biases** | Duplicate reports, Weber effect (reporting peaks ~2yr post-launch), notoriety/litigation bias (especially relevant for the rofecoxib retrospective), stimulated reporting, and co-medication confounding are inherent to spontaneous reporting and are not adjusted for. |
 | **Drug's top-N reactions capped at 50** | Reactions ranked >50 in the drug's own profile are not tested — a novel reaction ranked #51 would be missed |
 | **Comparator set is fixed** | Only 3 drugs with pre-configured comparators (semaglutide, rofecoxib, liraglutide). For other drugs, the within-class table will be empty. |
-| **Within-class CI assumes a homogeneous pool** | Counts are summed across all quarters and all comparator drugs before the CI is computed. This ignores between-quarter and between-comparator heterogeneity. A Mantel–Haenszel stratified estimate would be more correct; the current CI likely overstates precision when comparators have heterogeneous profiles. |
+| **Within-class CI uses quarterly strata (not comparator strata)** | The Mantel–Haenszel estimator stratifies by quarter (controls temporal variation). Comparator drugs within a quarter are still pooled. Full stratification by (quarter × comparator) would be more correct but requires per-comparator raw counts in the index. |
 | **BH-FDR uses Yates-corrected χ² p-values** | Yates correction is conservative (inflates p-values slightly), making BH mildly over-conservative — it errs toward fewer false signals, not more. Exact Fisher p-values would be the standard alternative. |
 
 ---
@@ -258,7 +258,8 @@ This tool is a **PRR + within-class disproportionality screener**. It is compara
 - [x] FDA label cross-reference — MedDRA LLT-expanded, negation-aware, sentence-scoped
 - [x] Three-state label match (Yes / Possible / No)
 - [x] PubMed literature evidence
-- [x] Within-class disproportionality — pooled rate ratio + 95% CI, Haldane–Anscombe correction
+- [x] Within-class disproportionality — Mantel–Haenszel stratified rate ratio + 95% CI (Robins–Breslow–Greenland), quarterly strata
+- [x] EBGM / EB05 — Gamma-Poisson Shrinker (DuMouchel 1999), industry-standard Bayesian shrinkage used by FDA MGPS and WHO UMC
 - [x] LLM investigation — function calling with 5 tools, CI-grounded prompts
 - [x] Deterministic table rendering — numbers never re-typed by model
 - [x] Signal registry — OpenSearch ML Memory (cross-run persistence)
