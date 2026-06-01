@@ -461,20 +461,27 @@ async def investigate(state: DrugSafetyState) -> dict:
         prr = signal["prr"]
         n   = signal["drug_count"]
 
+        # Grounded prompt: forces quoting raw tool results BEFORE reasoning.
+        # Prevents thinking models from substituting training knowledge for
+        # actual FAERS data. "paste exact JSON" makes tool calls mandatory.
         prompt = (
             f"You are a pharmacovigilance expert. Investigate ONE signal:\n"
             f"Signal: {rxn} (PRR={prr}, n={n}) for {drug}\n\n"
             f"{memory_context}"
-            f"Call these 3 tools:\n"
-            f"1. get_prr(drug='{drug}', reaction='{rxn}')\n"
-            f"2. check_class_effect(reaction='{rxn}', comparator_drugs={comparators})\n"
-            f"3. get_signal_trend(drug='{drug}', reaction='{rxn}')\n\n"
-            f"Then: identify LOWEST comparator PRR (smallest number). Calculate ratio.\n"
-            f"If ratio > 5: DRUG_SPECIFIC even if all comparators show some elevation.\n\n"
-            f"Output (3 lines only):\n"
+            f"Step 1: Call get_prr(drug='{drug}', reaction='{rxn}')\n"
+            f"        Write: \"get_prr returned: [paste exact JSON]\"\n\n"
+            f"Step 2: Call check_class_effect(reaction='{rxn}', comparator_drugs={comparators})\n"
+            f"        Write: \"check_class_effect returned: [paste exact JSON]\"\n\n"
+            f"Step 3: Call get_signal_trend(drug='{drug}', reaction='{rxn}')\n"
+            f"        Write: \"get_signal_trend returned: [paste exact JSON]\"\n\n"
+            f"Step 4: From ACTUAL tool results (not prior knowledge):\n"
+            f"        - Which comparator has the LOWEST PRR value (smallest number)?\n"
+            f"        - Calculate {drug}_PRR ÷ that_lowest_value\n"
+            f"        - Is ratio > 5? → DRUG_SPECIFIC\n\n"
+            f"Output (3 lines):\n"
             f"CLASSIFICATION: [CLASS_EFFECT|DRUG_SPECIFIC] | [GROWING|STABLE|EMERGING] {persistent_tag}\n"
-            f"RATIO: {drug} is [X]x lowest comparator ([drug_name]=[prr_value])\n"
-            f"INSIGHT: [one clinical sentence]"
+            f"RATIO: {drug} is [X]x lowest comparator ([drug_name]=[prr_value from tool])\n"
+            f"INSIGHT: [one clinical sentence based on tool data]"
         )
 
         result = await _investigator_agent.ainvoke({"messages": [("user", prompt)]})
