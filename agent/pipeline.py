@@ -95,7 +95,7 @@ def _model_31b():
             model=INVESTIGATOR_MODEL,
             base_url=LOCAL_MODEL_URL,
             api_key="docker",
-            max_tokens=4000,   # thinking tokens + tool calls + synthesis
+            max_tokens=8000,   # ceiling only — model stops when done; 8K gives headroom for complex multi-signal runs
             temperature=0,
         )
     try:
