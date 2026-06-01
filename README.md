@@ -267,10 +267,11 @@ This tool is a **PRR + within-class disproportionality screener**. It is compara
 - [x] Polars ingestion — 3× less memory, handles AERS + FAERS formats
 - [x] Full FAERS 2004–2026 (historical + current)
 - [x] Web UI — FastAPI + SSE streaming, dark-mode
+- [x] EBGM / EB05 — Gamma-Poisson Shrinker (DuMouchel 1999)
+- [x] GitHub Actions CI — runs pure-function test suite + schema smoke-import on every push
 - [ ] Stratified PRR (by age / sex / reporter type)
-- [ ] BCPNN / EBGM Bayesian shrinkage estimators
+- [ ] BCPNN (Bayesian Confidence Propagation Neural Network — WHO Uppsala alternative to EBGM)
 - [ ] Configurable comparator groups (currently hardcoded for 3 drugs)
-- [ ] GitHub Actions CI
 
 ---
 

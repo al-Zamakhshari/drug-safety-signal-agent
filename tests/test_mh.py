@@ -111,20 +111,39 @@ class TestMHRateRatio:
 
     def test_mh_controls_temporal_confounding(self):
         """
-        MH rate ratio should be closer to the true within-stratum RR than the
-        naive pooled estimate when the drug's total volume changes over time.
+        MH correctly recovers the within-stratum RR when naive pooling is biased.
 
-        Scenario: true within-quarter RR = 2.0 in all quarters, but drug volume
-        grew 10× over the period. Naive pooling inflates the estimate; MH doesn't.
+        Scenario (a genuine confounded case):
+          - True within-quarter RR = 2.0 in ALL quarters (drug rate always 2× class)
+          - Comparator rate CHANGES over time: 20% in early quarters → 1% in later
+          - Drug volume also grows
+
+        This creates confounding: when comp rate is high (early), comp totals are
+        large, making those quarters dominate the naive pool and pulling the naive
+        estimate toward those quarters' RR. Since within-quarter RR is always 2.0
+        but the naive pool weights quarters by raw count, the bias can be large.
+
+        MH correctly recovers 2.0 because it weights each stratum by its information
+        content N_k/(n1_k × n2_k) rather than raw volume.
         """
         true_rr = 2.0
-        # 8 quarters; drug volume grows 1× → 8×; comp volume is constant
         strata = []
-        for q in range(8):
-            n1 = 100 * (q + 1)     # drug volume grows
-            n2 = 1000              # comp volume constant
-            a  = int(n1 * 0.10)   # drug rate = 10%
-            c  = int(n2 * 0.05)   # comp rate = 5%  → true RR = 2.0
+        # Early quarters: high comp rate (20%), large comp volume → dominates naive pool
+        for _ in range(4):
+            n1 = 100;  n2 = 1000
+            comp_rate = 0.20      # comp rate: 20%
+            drug_rate = comp_rate * true_rr  # drug rate: 40%
+            a = int(n1 * drug_rate)
+            c = int(n2 * comp_rate)
+            strata.append(_make_stratum(a, n1, c, n2))
+
+        # Later quarters: low comp rate (1%), smaller drug volume
+        for _ in range(4):
+            n1 = 500;  n2 = 1000
+            comp_rate = 0.01      # comp rate: 1%
+            drug_rate = comp_rate * true_rr  # drug rate: 2%
+            a = int(n1 * drug_rate)
+            c = int(n2 * comp_rate)
             strata.append(_make_stratum(a, n1, c, n2))
 
         rr_mh, _, _ = _mh_rate_ratio(strata)
@@ -136,6 +155,15 @@ class TestMHRateRatio:
         total_n2 = sum(s["comp_total"]  for s in strata)
         rr_naive = (total_a / total_n1) / (total_c / total_n2)
 
-        # Both should be close to 2.0 in this balanced scenario,
-        # but MH should be at least as accurate as naive pool
-        assert abs(rr_mh - true_rr) <= abs(rr_naive - true_rr) + 0.1
+        # MH must recover the true within-stratum RR within 5%
+        assert abs(rr_mh - true_rr) < 0.15, \
+            f"MH should recover RR=2.0, got {rr_mh:.3f}"
+
+        # Naive pool should be visibly biased (at least 15% off true RR)
+        # — confirming the test is actually testing something
+        assert abs(rr_naive - true_rr) > 0.15, \
+            f"Naive pool expected to be biased in this scenario, got {rr_naive:.3f}"
+
+        # And MH is closer to truth than naive
+        assert abs(rr_mh - true_rr) < abs(rr_naive - true_rr), \
+            f"MH ({rr_mh:.3f}) should be closer to {true_rr} than naive ({rr_naive:.3f})"

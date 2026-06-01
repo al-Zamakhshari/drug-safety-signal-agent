@@ -117,6 +117,22 @@ class TestEBGMComputation:
             assert ebgm >= 0.0
             assert eb05 >= 0.0
 
+    def test_large_o_small_e_no_underflow_crash(self):
+        """
+        Regression test for the log-weight underflow crash (line 188 before fix).
+
+        When O is large and E is small (e.g. a reaction where one drug accounts
+        for nearly all reports), both log-weights are very negative. Before the fix,
+        math.exp(log_w) underflowed to 0.0, then math.log(0) raised ValueError.
+        With np.logaddexp, this is numerically stable.
+        """
+        params = self._default_params()
+        # O=5000, E=0.8: extreme case — one drug accounts for most reports of this reaction
+        ebgm, eb05 = compute_ebgm(5000, 0.8, params)
+        assert math.isfinite(ebgm), f"Expected finite EBGM, got {ebgm}"
+        assert math.isfinite(eb05), f"Expected finite EB05, got {eb05}"
+        assert ebgm > 0.0
+
     def test_eb05_grows_with_n_for_same_oe_ratio(self):
         """
         The practical GPS shrinkage property: for the same O/E ratio,

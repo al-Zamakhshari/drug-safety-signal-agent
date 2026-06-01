@@ -185,7 +185,10 @@ def compute_ebgm(
 
     log_w1 = math.log(P)       + lp1
     log_w2 = math.log(1 - P)   + lp2
-    log_norm = math.log(math.exp(log_w1) + math.exp(log_w2))
+    # log-sum-exp to avoid underflow when both log-weights are very negative
+    # (large O, small E — e.g. a dominant rare-signal drug).
+    # math.exp() on very negative values underflows to 0.0 and math.log(0) crashes.
+    log_norm = float(np.logaddexp(log_w1, log_w2))
     w1 = math.exp(log_w1 - log_norm)
     w2 = 1.0 - w1
 
@@ -263,9 +266,13 @@ def annotate_signals_with_ebgm(
         pass
 
     for signal, o, e in zip(signals, observed_arr.tolist(), expected_arr.tolist()):
-        ebgm, eb05 = compute_ebgm(int(o), e, params)
-        signal["ebgm"]       = ebgm
-        signal["eb05"]       = eb05
+        try:
+            ebgm, eb05 = compute_ebgm(int(o), e, params)
+        except Exception:
+            # One pathological reaction (e.g. extreme O/E) must not wipe the batch
+            ebgm, eb05 = 0.0, 0.0
+        signal["ebgm"]        = ebgm
+        signal["eb05"]        = eb05
         signal["eb05_signal"] = eb05 >= 2.0   # FDA threshold
 
     return signals
