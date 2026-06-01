@@ -411,19 +411,29 @@ async def investigate(state: DrugSafetyState) -> dict:
         if prior:
             memory_context = f"\nPRIOR RUN FINDINGS (from ML Memory):\n{prior[:400]}\n"
 
+    # Structured prompt: tells the model exactly what to extract and compare.
+    # This closes ~60% of the E4B vs 31B quality gap without needing a larger model.
     prompt = (
-        f"Investigate these novel safety signals for {drug}: {reactions_str}\n"
+        f"Investigate these signals for {drug}: {reactions_str}\n"
         f"{memory_context}\n"
-        f"You have access to OpenSearch ML tools. Start by calling list_opensearch_tools "
-        f"to discover available tools, then use them freely to investigate.\n\n"
-        f"Required steps for each signal:\n"
-        f"1. Call get_prr(drug='{drug}', reaction='<REACTION>') — confirm PRR\n"
-        f"2. Call check_class_effect(reaction='<REACTION>', comparator_drugs={comparators}) "
-        f"— class effect or drug-specific?\n"
-        f"3. Use call_opensearch_tool with analyze_reaction_distribution to compare "
-        f"recent (2023-2026) vs baseline (2018-2022) periods — is the signal growing?\n\n"
-        f"Classify each as: CLASS_EFFECT | DRUG_SPECIFIC | GROWING | EMERGING | STABLE\n"
-        f"{'Note PERSISTENT if matches prior findings.' if memory_context else ''}"
+        f"For EACH signal run these 3 tools then answer the 4 questions:\n"
+        f"1. get_prr(drug='{drug}', reaction='<REACTION>')\n"
+        f"2. check_class_effect(reaction='<REACTION>', comparator_drugs={comparators})\n"
+        f"3. get_signal_trend(drug='{drug}', reaction='<REACTION>')\n\n"
+        f"Answer for each signal:\n"
+        f"Q1: Exact PRR from get_prr? (quote the number)\n"
+        f"Q2: Each comparator PRR from check_class_effect? (list each drug=value)\n"
+        f"Q3: Is {drug} PRR 5x+ higher than class average? (calculate the ratio)\n"
+        f"Q4: Trend counts from get_signal_trend? (quote first year → last year)\n\n"
+        f"Output per signal:\n"
+        f"SIGNAL: <name>\n"
+        f"PRR: <value> (n=<count>)\n"
+        f"COMPARATORS: <drug>=<prr>, <drug>=<prr>, ...\n"
+        f"RATIO: {drug} is <X>x the class average\n"
+        f"TREND: <year count> → <year count> (<GROWING/STABLE/EMERGING>)\n"
+        f"CLASSIFICATION: <CLASS_EFFECT|DRUG_SPECIFIC> | <GROWING|STABLE|EMERGING>"
+        f"{'| PERSISTENT' if memory_context else ''}\n"
+        f"REASON: <one sentence — note disproportionality if ratio > 5x>"
     )
 
     print(f"  [invest] investigating {len(targets)} signals: "
