@@ -17,7 +17,7 @@ load_dotenv()
 
 OPENSEARCH_URL  = os.getenv("OPENSEARCH_URL", "https://localhost:9200")
 OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "admin")
-OPENSEARCH_PASS = os.getenv("OPENSEARCH_PASSWORD", "Admin@changeme1")
+OPENSEARCH_PASS = os.getenv("OPENSEARCH_PASSWORD", "Pharma@2024!")
 INDEX           = os.getenv("OPENSEARCH_INDEX", "faers_reports")
 OPENFDA_BASE    = "https://api.fda.gov/drug/event.json"
 

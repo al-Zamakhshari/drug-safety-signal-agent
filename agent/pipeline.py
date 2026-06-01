@@ -2,16 +2,16 @@
 Drug Safety Signal Detection — LangGraph pipeline
 
 Node responsibilities:
-  Python nodes  → all data retrieval and computation (deterministic)
-  Gemma4 E4B   → two roles:
-    1. investigator_node: function calling — detects class effects / DDI / trends
-    2. write_report: formats all findings into clinical prose
+  Python nodes   → all data retrieval and computation (deterministic)
+  Qwen3.5-9B    → two roles:
+    1. investigator_node: function calling (thinking=ON) — class effects / DDI / trends
+    2. write_report: clinical prose only (thinking=OFF, fast)
 
 Graph:
-  resolve_names → calculate_prr → anomaly_detection → fetch_label
+  resolve_names → load_memory → calculate_prr → anomaly_detection → fetch_label
        → [search_literature?]
        → [investigator?]
-       → write_report
+       → write_report → save_memory
 """
 
 import os
@@ -261,10 +261,11 @@ def _is_labeled(reaction: str, label_text: str) -> bool:
 
     if not clin:
         key = re.sub(r"[^a-z ]+", " ", reaction.lower()).strip()
-        return bool(key) and key in label_text
+        return bool(key) and key in label_text.lower()
 
-    # Expand label text with synonyms before matching
-    expanded = _expand_label(label_text)
+    # Lowercase before expansion so sentence-initial capitals don't break
+    # re.findall(r"[a-z]+", ...) — "Pancreatitis" → "pancreatitis" not "ancreatitis"
+    expanded = _expand_label(label_text.lower())
 
     # Fast-fail: required token absent from entire expanded label
     if not clin.issubset(set(re.findall(r"[a-z]+", expanded))):

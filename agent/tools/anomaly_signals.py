@@ -3,9 +3,11 @@ Query class_ratio anomaly signals for drug safety from faers_ml_rates index.
 
 class_ratio = drug_rate / mean(comparator_class_rate)
 
-class_ratio > 3  → strong drug-specific signal
-class_ratio > 1  → mild elevation above class baseline
-class_ratio < 1  → reaction is LESS common than class average
+class_ratio > 3           → strong drug-specific signal
+class_ratio > 1           → mild elevation above class baseline
+class_ratio < 1           → reaction is LESS common than class average
+class_ratio = 999.0 (sentinel) → reaction absent from ALL comparators;
+                              shown as no_class_baseline=True (undefined ratio)
 
 No AD detector training needed — class_ratio is pre-computed by
 compute_class_ratio.py and is immediately queryable.
@@ -92,13 +94,15 @@ async def get_anomaly_signals(
             max_count = int(b["max_count"]["value"] or 0)
             quarters  = b["quarters_seen"]["value"]
 
-            # Skip 999.0 sentinel values — these mean the reaction is absent
-            # from ALL comparators (no class baseline), making the ratio meaningless.
-            # A real drug-specific signal needs at least one comparator to compare against.
-            if max_ratio >= 999.0:
+            if max_count < min_count:
                 continue
 
-            if max_ratio < min_ratio or max_count < min_count:
+            # 999.0 sentinel: reaction appears in this drug but in ZERO comparators.
+            # Show it with a NO_CLASS_BASELINE tag — it may be genuinely novel but
+            # the class comparison is undefined (not a ratio signal).
+            no_class_baseline = max_ratio >= 999.0
+
+            if not no_class_baseline and max_ratio < min_ratio:
                 continue
 
             avg_recent = b["recent"]["avg_recent"]["value"] or 0
@@ -111,13 +115,14 @@ async def get_anomaly_signals(
                 trend = "STABLE"
 
             signals.append({
-                "reaction":   rxn,
-                "max_ratio":  round(max_ratio, 2),
-                "avg_ratio":  round(avg_ratio, 2),
-                "max_count":  max_count,
-                "quarters":   quarters,
-                "trend":      trend,
-                "persistent": quarters >= 3,
+                "reaction":          rxn,
+                "max_ratio":         None if no_class_baseline else round(max_ratio, 2),
+                "avg_ratio":         None if no_class_baseline else round(avg_ratio, 2),
+                "max_count":         max_count,
+                "quarters":          quarters,
+                "trend":             trend,
+                "persistent":        quarters >= 3,
+                "no_class_baseline": no_class_baseline,
             })
 
         signals.sort(key=lambda x: -x["max_ratio"])

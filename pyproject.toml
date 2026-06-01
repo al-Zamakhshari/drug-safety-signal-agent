@@ -1,7 +1,7 @@
 [project]
 name = "drug-safety-signal-agent"
 version = "0.1.0"
-description = "Local drug safety signal detection using OpenSearch + Gemma4"
+description = "Local drug safety signal detection using OpenSearch + Qwen3.5"
 requires-python = ">=3.11"
 dependencies = [
     # LangGraph — agent pipeline framework (MIT)
@@ -25,6 +25,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "sse-starlette>=2.1",
+    "langchain-google-genai>=4.2.4",
 ]
 
 [build-system]
@@ -33,6 +34,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent", "ingestion", "app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [dependency-groups]
 dev = [

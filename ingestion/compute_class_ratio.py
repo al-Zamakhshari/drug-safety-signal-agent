@@ -76,14 +76,6 @@ def _quarter_to_date(q_str: str) -> str:
         return None
 
 
-    return AsyncOpenSearch(
-        hosts=[os.getenv("OPENSEARCH_URL", "https://localhost:9200")],
-        http_auth=(os.getenv("OPENSEARCH_USER", "admin"),
-                   os.getenv("OPENSEARCH_PASSWORD", "Pharma@2024!")),
-        use_ssl=True, verify_certs=False, ssl_show_warn=False,
-    )
-
-
 async def _get_quarterly_rates(client, drug_names: list[str]) -> dict:
     """
     Returns {quarter_date_str: {reaction: rate, "__total__": count}}
@@ -174,8 +166,11 @@ async def compute_and_index(drug_key: str, group: dict) -> int:
                 if class_rate > 0:
                     class_ratio = round(drug_rate / class_rate, 4)
                 else:
-                    # Reaction absent from entire drug class → strong drug-specific
-                    # signal. Cap at 999 instead of divide-by-zero.
+                    # Reaction absent from entire drug class → class comparison
+                    # undefined (divide-by-zero). Store sentinel 999.0 so queries
+                    # can distinguish "undefined" from "high but finite" ratios.
+                    # anomaly_signals.py surfaces these as no_class_baseline=True
+                    # rather than silently dropping them.
                     class_ratio = 999.0
                 drug_count  = int(drug_rate * drug_total)
 

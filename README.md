@@ -6,10 +6,13 @@
 ```bash
 git clone https://github.com/al-Zamakhshari/drug-safety-signal-agent
 cd drug-safety-signal-agent
-docker compose up -d
 uv sync
+docker compose up -d                    # pulls Qwen3.5-9B ~5.6GB on first run
+./ingestion/download_faers.sh           # downloads FAERS 2018–2026 to ~/faers_data/
 uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
-uv run python -m app.server          # → http://localhost:8080
+uv run python -m ingestion.compute_class_ratio
+uv run python -m ingestion.register_mcp_tools   # one-time: registers OS MCP tools
+uv run python -m app.server            # → http://localhost:8080
 ```
 
 ---
@@ -24,7 +27,7 @@ Detects drug safety signals from FDA FAERS adverse event reports using a fully l
 | Anomaly detection | class_ratio vs therapeutic class | OpenSearch faers_ml_rates |
 | Label cross-reference | Synonym-aware token-overlap | openFDA API |
 | Literature evidence | PubMed search | NCBI eUtils |
-| Investigation | Function calling — class effect / trend / DDI | Gemma4 E2B |
+| Investigation | Function calling — class effect / trend / DDI | Qwen3.5-9B |
 | Signal memory | Cross-run persistence | OpenSearch ML Memory (3.6+) |
 | Web interface | Real-time streaming briefing | FastAPI + SSE |
 
@@ -51,7 +54,7 @@ Everything runs locally via Docker. Zero external dependencies.
 | Component | Technology | License |
 |-----------|-----------|---------|
 | Database | [OpenSearch 3.6.0](https://opensearch.org) | Apache 2.0 |
-| LLM | Gemma4 E2B (2B active, ~3GB) via Docker Model Runner | [Gemma](https://ai.google.dev/gemma/terms) |
+| LLM | [Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) Q4_K_XL (~5.6GB) via Docker Model Runner | Apache 2.0 |
 | Agent framework | [LangGraph](https://langchain-ai.github.io/langgraph/) | MIT |
 | Web UI | FastAPI + SSE streaming | MIT |
 | Ingestion | [Polars](https://pola.rs) — 3× less memory than pandas | MIT |
@@ -64,7 +67,7 @@ Everything runs locally via Docker. Zero external dependencies.
 
 - **Docker Desktop** with [Model Runner](https://docs.docker.com/desktop/features/model-runner/) enabled
 - **Python 3.11+** with [uv](https://docs.astral.sh/uv/)
-- **16GB RAM** recommended (OpenSearch 1.5GB + Gemma4 E2B ~3GB)
+- **16GB RAM** recommended (OpenSearch 1.5GB + Qwen3.5-9B ~5.6GB)
 - **~10GB disk** for full FAERS 2018–2026 dataset
 
 ---
@@ -75,16 +78,16 @@ Everything runs locally via Docker. Zero external dependencies.
 # 1. Install dependencies
 uv sync
 
-# 2. Start infrastructure (downloads Gemma4 ~3GB on first run)
+# 2. Start infrastructure (pulls Qwen3.5-9B ~5.6GB on first run)
 docker compose up -d
 
 # 3. Load FAERS data
 
-# Quick demo — 5 min via openFDA API
+# Quick demo — 5 min via openFDA API, no download needed
 uv run python -m ingestion.faers_indexer --drug semaglutide --limit 6000
 uv run python -m ingestion.faers_indexer --drug rofecoxib --limit 2000
 
-# Full dataset — 2018–2026, ~11.9M reports, ~1 hour
+# Full dataset — 2018–2026, ~11.9M reports, ~1 hour + download
 ./ingestion/download_faers.sh
 uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 
@@ -95,15 +98,15 @@ uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 # 4. Compute class-ratio (one-time, enables anomaly detection)
 uv run python -m ingestion.compute_class_ratio
 
-# 5a. Web UI
+# 5. Register OpenSearch MCP tools (one-time, enables free-form investigation)
+uv run python -m ingestion.register_mcp_tools
+
+# 6a. Web UI
 uv run python -m app.server          # → http://localhost:8080
 
-# 5b. CLI
+# 6b. CLI
 uv run python main.py semaglutide
 uv run python main.py rofecoxib      # retrospective: recalled 2004 for MI risk
-
-# Switch to E4B for richer prose (default is E2B — faster, smaller)
-LOCAL_MODEL_NAME=docker.io/ai/gemma4:E4B uv run python main.py semaglutide
 ```
 
 ---
@@ -142,13 +145,13 @@ LangGraph StateGraph — 10 nodes
 ├── [search_lit?]        PubMed API                                     Python
 │   (PRR≥3 AND χ²-significant AND unlabeled)
 │
-├── [investigate?]       Gemma4 E2B — function calling, temp=0          LLM
+├── [investigate?]       Qwen3.5-9B — function calling, temp=0          LLM
 │   (PRR≥5 AND χ²-significant AND unlabeled)
 │   tools: get_prr, check_class_effect, get_signal_trend,
 │          compare_time_periods (DataDistributionTool),
 │          search_faers (flexible DSL queries)
 │
-├── write_report         Gemma4 E2B — narrative prose only              LLM
+├── write_report         Qwen3.5-9B — narrative prose only              LLM
 │   (PRR/anomaly tables emitted by Python — numbers never re-typed by model)
 │
 └── save_memory          OpenSearch ML Memory → persist findings         Python
@@ -249,3 +252,5 @@ The system was audited by Claude Opus for overfitting and rigging. Key findings:
 ## Disclaimer
 
 For **research purposes only**. PRR signals are statistical associations, not causal evidence. No regulatory decisions should be made based solely on this tool's output. Requires clinical validation before any regulatory action.
+
+**LLM narrative caveat**: The "Key Findings", "Classification" labels (DRUG_SPECIFIC / CLASS_EFFECT), and "Clinical Insight" sentences in the briefing are generated by Qwen3.5-9B. They are advisory and non-deterministic — the same data may produce different narrative text across runs. All numeric values (PRR, χ², counts, class_ratio) are computed deterministically by Python and are reproducible.

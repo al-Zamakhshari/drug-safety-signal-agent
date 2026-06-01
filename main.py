@@ -1,9 +1,12 @@
 """Entry point — analyze drug safety signals locally.
 
 Uses LangGraph pipeline:
-  resolve_names → calculate_prr → fetch_label → [search_literature?] → write_report
+  resolve_names → load_memory → calculate_prr → anomaly_detection → fetch_label
+       → [search_literature?] → [investigator?] → write_report → save_memory
 
-Python handles all data retrieval. LLM (Gemma4 E4B) only writes the final report.
+Python handles all data retrieval and statistics. Qwen3.5-9B:
+  - investigator_node: function calling with thinking=ON (class effects / DDI / trends)
+  - write_report: clinical prose with thinking=OFF (fast, deterministic output)
 """
 
 import asyncio
