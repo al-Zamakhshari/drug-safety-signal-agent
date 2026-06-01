@@ -7,25 +7,39 @@ dependencies = [
     # LangGraph — agent pipeline framework (MIT)
     "langgraph>=1.2.2",
     "langchain-core>=1.4.0",
-    # OpenSearch client (Apache 2.0, ES-compatible API)
+    "langchain-openai>=1.2.2",
+    "langchain-google-genai>=4.2.4",
+    # OpenSearch client (Apache 2.0)
     "opensearch-py[async]>=2.7.0",
     # HTTP client for openFDA + PubMed
     "httpx>=0.27.0",
-    # LiteLLM for local model runner
-    "litellm>=1.40.0",
-    # Phoenix observability (optional but included)
-    "arize-phoenix[otel]>=4.0.0",
-    "openinference-instrumentation-litellm>=0.1.0",
+    # Statistics — scipy/numpy for CI, BH-FDR, EBGM GPS
+    "numpy>=1.26.0",
+    "scipy>=1.12.0",
     # Utilities
     "python-dotenv>=1.0.0",
-    "langgraph>=1.2.2",
-    "langchain-core>=1.4.0",
-    "langchain-openai>=1.2.2",
+    # Ingestion
     "polars>=1.41.2",
+    # Web UI
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "sse-starlette>=2.1",
-    "langchain-google-genai>=4.2.4",
+]
+
+[project.optional-dependencies]
+# Optional observability via Arize Phoenix + OpenTelemetry.
+# Install with: uv sync --extra observability
+# Start Phoenix:  docker compose --profile observability up -d phoenix
+# Then traces appear at http://localhost:6006
+observability = [
+    # Phoenix server (heavy: pulls pandas, pyarrow, scikit-learn, sqlalchemy, grpcio…)
+    "arize-phoenix[otel]>=4.0.0",
+    # LangChain instrumentor — traces ChatOpenAI / LangGraph calls
+    # (replaces the old LiteLLM instrumentor which was dead code: pipeline uses ChatOpenAI)
+    "openinference-instrumentation-langchain>=0.1.0",
+    # OTLP exporter (lightweight — also used when Phoenix is not installed)
+    "opentelemetry-exporter-otlp-proto-grpc>=1.24.0",
+    "opentelemetry-sdk>=1.24.0",
 ]
 
 [build-system]

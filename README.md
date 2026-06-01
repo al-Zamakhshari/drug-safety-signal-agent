@@ -305,7 +305,7 @@ Everything runs locally via Docker. Zero external dependencies.
 | Agent framework | [LangGraph](https://langchain-ai.github.io/langgraph/) | MIT |
 | Web UI | FastAPI + SSE streaming | MIT |
 | Ingestion | [Polars](https://pola.rs) — 3× less memory than pandas | MIT |
-| Observability | [Arize Phoenix](https://phoenix.arize.com) | Apache 2.0 |
+| Observability | [Arize Phoenix](https://phoenix.arize.com) (optional) | Apache 2.0 |
 | Data | FDA openFDA API + PubMed + FDA FAERS ZIPs | Public domain |
 
 ---
@@ -469,8 +469,17 @@ Background reactions show larger Δ because our 2018–2026 extract (12M reports
 ## Observability
 
 - **Web UI**: `http://localhost:8080` — real-time streaming briefing
-- **Phoenix traces**: `http://localhost:6006` (start with `docker compose up phoenix`)
 - **OpenSearch Dashboards**: `http://localhost:5601` (admin / Pharma@2024!)
+- **Phoenix traces** (optional): instruments LangChain/LangGraph calls
+
+```bash
+# Enable Phoenix tracing
+docker compose --profile observability up -d phoenix
+uv sync --extra observability
+# Traces appear at http://localhost:6006
+```
+
+Phoenix is **not** started by default — `docker compose up -d` runs the pipeline without it. The agent silently skips tracing if Phoenix is not reachable.
 
 ---
 

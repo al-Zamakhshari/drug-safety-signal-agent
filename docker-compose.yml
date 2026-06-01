@@ -67,8 +67,15 @@ services:
       opensearch:
         condition: service_healthy
 
+  # ── Optional: Arize Phoenix observability ─────────────────────────────────
+  # Not started by default. Enable with:
+  #   docker compose --profile observability up -d
+  # Then install Python extras:
+  #   uv sync --extra observability
+  # Traces appear at: http://localhost:6006
   phoenix:
     image: arizephoenix/phoenix:latest
+    profiles: ["observability"]
     ports:
       - "6006:6006"
       - "4317:4317"
@@ -84,6 +91,7 @@ services:
       - OPENSEARCH_USER=admin
       - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:-Pharma@2024!}
       - OPENSEARCH_MCP_URL=http://opensearch-mcp:8001
+      # Phoenix is optional — agent silently skips tracing if not reachable
       - PHOENIX_URL=http://phoenix:6006
       - LOCAL_MODEL_URL=http://model-runner.docker.internal/engines/llama.cpp/v1
       # Qwen3.5-9B for both roles: investigation (thinking=on) + report (thinking=off)
@@ -94,8 +102,6 @@ services:
     depends_on:
       opensearch:
         condition: service_healthy
-      phoenix:
-        condition: service_started
     models:
       - qwen35
 
