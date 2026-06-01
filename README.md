@@ -34,13 +34,13 @@ Detects drug safety signals from FDA FAERS adverse event reports using a fully l
 **Example output — semaglutide, 82,699 reports, 11.9M baseline:**
 
 ```
-### PRR Signals (EMA standard: PRR ≥ 2.0, 95% CI lower > 1, BH q < 0.05)
-| Reaction                   | PRR   | 95% CI        | χ²/CI/FDR | Reports | Label? |
-|----------------------------|-------|---------------|-----------|---------|--------|
-| IMPAIRED GASTRIC EMPTYING  | 82.72 | 79.8–85.7     | ✓✓✓       | 3,057   | Yes    |
-| GLYCOSYLATED HB INCREASED  | 11.54 | 10.9–12.2     | ✓✓✓       | 1,111   | No ⚠️  |
-| PANCREATITIS               | 10.38 | 9.8–11.0      | ✓✓✓       | 1,504   | Yes    |
-| BLOOD GLUCOSE DECREASED    | 9.97  | 9.4–10.6      | ✓✓✓       | 1,311   | No ⚠️  |
+### PRR + ROR Signals (PRR/ROR ≥ 2.0, 95% CI lower > 1, BH q < 0.05)
+| Reaction                  | PRR (95% CI)      | ROR (95% CI)      | χ²/CI/FDR | n     | Label? |
+|---------------------------|-------------------|-------------------|-----------|-------|--------|
+| IMPAIRED GASTRIC EMPTYING | 82.72 (79.8–85.7) | 85.86 (82.1–89.8) | ✓✓✓       | 3,057 | Yes    |
+| GLYCOSYLATED HB INCREASED | 11.54 (10.9–12.2) | 11.68 (11.0–12.4) | ✓✓✓       | 1,111 | No ⚠️  |
+| PANCREATITIS              | 10.38 (9.8–11.0)  | 10.55 (9.9–11.2)  | ✓✓✓       | 1,504 | Yes    |
+| BLOOD GLUCOSE DECREASED   | 9.97 (9.4–10.6)   | 10.12 (9.5–10.8)  | ✓✓✓       | 1,311 | No ⚠️  |
 
 Risk: HIGH  |  Action: ESCALATE
 ```
@@ -236,6 +236,8 @@ This tool is a **PRR + within-class disproportionality screener**. It is compara
 | **FAERS structural biases** | Duplicate reports, Weber effect (reporting peaks ~2yr post-launch), notoriety/litigation bias (especially relevant for the rofecoxib retrospective), stimulated reporting, and co-medication confounding are inherent to spontaneous reporting and are not adjusted for. |
 | **Drug's top-N reactions capped at 50** | Reactions ranked >50 in the drug's own profile are not tested — a novel reaction ranked #51 would be missed |
 | **Comparator set is fixed** | Only 3 drugs with pre-configured comparators (semaglutide, rofecoxib, liraglutide). For other drugs, the within-class table will be empty. |
+| **Within-class CI assumes a homogeneous pool** | Counts are summed across all quarters and all comparator drugs before the CI is computed. This ignores between-quarter and between-comparator heterogeneity. A Mantel–Haenszel stratified estimate would be more correct; the current CI likely overstates precision when comparators have heterogeneous profiles. |
+| **BH-FDR uses Yates-corrected χ² p-values** | Yates correction is conservative (inflates p-values slightly), making BH mildly over-conservative — it errs toward fewer false signals, not more. Exact Fisher p-values would be the standard alternative. |
 
 ---
 

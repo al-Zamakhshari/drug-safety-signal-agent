@@ -412,12 +412,13 @@ async def run_anomaly_detection(state: DrugSafetyState) -> dict:
     """Query OpenSearch AD for class_ratio anomalies. Pure Python — no LLM."""
     # Use canonical drug name (as indexed in faers_ml_rates), not brand names
     drug = state["drug_name"].upper()
-    result = await get_anomaly_signals(drug, min_ratio=2.0, min_count=5, top_n=15)
+    result = await get_anomaly_signals(drug, min_ratio_lower=1.0, min_count=5, top_n=15)
     signals = result.get("signals", [])
-    print(f"  [AD]     {len(signals)} anomaly signals")
+    print(f"  [AD]     {len(signals)} within-class signals")
     if signals:
-        top3 = [(s["reaction"], s["max_ratio"]) for s in signals[:3]]
-        print(f"           top: {top3}")
+        top3 = [(s["reaction"], s.get("class_ratio_lower", s.get("class_ratio")))
+                for s in signals[:3]]
+        print(f"           top (by CI lower): {top3}")
     return {"anomaly_signals": signals}
 
 
