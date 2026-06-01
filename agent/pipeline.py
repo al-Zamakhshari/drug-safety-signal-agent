@@ -455,13 +455,14 @@ async def investigate(state: DrugSafetyState) -> dict:
         f"2. check_class_effect(reaction='<REACTION>', comparator_drugs={comparators})\n"
         f"3. get_signal_trend(drug='{drug}', reaction='<REACTION>')\n\n"
         f"Then reason carefully:\n"
-        f"- Calculate {drug}_PRR ÷ weakest_comparator_PRR (not average)\n"
-        f"- If ratio > 5: flag DRUG_SPECIFIC even if class shows some elevation\n"
+        f"- Identify the comparator with the LOWEST PRR value (smallest number)\n"
+        f"- Calculate {drug}_PRR ÷ that_lowest_PRR_value\n"
+        f"- If ratio > 5: flag DRUG_SPECIFIC even if all comparators show elevation\n"
         f"- What does the trend say about clinical urgency?\n\n"
         f"Output per signal (3 lines):\n"
         f"CLASSIFICATION: <CLASS_EFFECT|DRUG_SPECIFIC> | <GROWING|STABLE|EMERGING>"
         f"{'| PERSISTENT' if memory_context else ''}\n"
-        f"RATIO: {drug} is <X>x weakest comparator (<drug>=<prr>)\n"
+        f"RATIO: {drug} is <X>x lowest comparator (<drug_with_lowest_prr>=<its_prr>)\n"
         f"INSIGHT: <one clinical sentence noting disproportionality if ratio > 5>"
     )
 
