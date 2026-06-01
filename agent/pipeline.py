@@ -86,14 +86,16 @@ def _model_31b():
     than E2B (4B → 31B active params). Falls back to local E2B if no key.
     """
     if not GOOGLE_API_KEY:
-        # Use INVESTIGATOR_MODEL if available (default: Qwen3.5-9B)
-        # Qwen3.5-9B outperforms E4B on reasoning depth while being same size.
-        # Falls back to LOCAL_MODEL_NAME (E2B) if investigator model not pulled.
+        # Qwen3.5-9B with thinking=ON and 4K tokens.
+        # Key finding: thinking mode allows Qwen3.5 to compute ratio vs WEAKEST
+        # comparator (not average), catching DRUG_SPECIFIC signals that CLASS_EFFECT
+        # classification would miss. Without thinking: 2.92x average → CLASS_EFFECT.
+        # With thinking: 5.36x weakest → DRUG_SPECIFIC. Clinically significant difference.
         return ChatOpenAI(
             model=INVESTIGATOR_MODEL,
             base_url=LOCAL_MODEL_URL,
             api_key="docker",
-            max_tokens=2000,
+            max_tokens=4000,   # thinking tokens + tool calls + synthesis
             temperature=0,
         )
     try:
@@ -441,29 +443,26 @@ async def investigate(state: DrugSafetyState) -> dict:
         if prior:
             memory_context = f"\nPRIOR RUN FINDINGS (from ML Memory):\n{prior[:400]}\n"
 
-    # Structured prompt: tells the model exactly what to extract and compare.
-    # This closes ~60% of the E4B vs 31B quality gap without needing a larger model.
+    # Thinking-optimised prompt: leverages Qwen3.5 thinking mode to compute
+    # ratio vs WEAKEST comparator (not average). This catches DRUG_SPECIFIC
+    # signals that average-based classification would miss.
+    # Key: "ratio > 5 → flag DRUG_SPECIFIC even if class shows elevation"
     prompt = (
-        f"Investigate these signals for {drug}: {reactions_str}\n"
+        f"You are a pharmacovigilance expert. Investigate these signals for {drug}: {reactions_str}\n"
         f"{memory_context}\n"
-        f"For EACH signal run these 3 tools then answer the 4 questions:\n"
+        f"For EACH signal call these 3 tools:\n"
         f"1. get_prr(drug='{drug}', reaction='<REACTION>')\n"
         f"2. check_class_effect(reaction='<REACTION>', comparator_drugs={comparators})\n"
         f"3. get_signal_trend(drug='{drug}', reaction='<REACTION>')\n\n"
-        f"Answer for each signal:\n"
-        f"Q1: Exact PRR from get_prr? (quote the number)\n"
-        f"Q2: Each comparator PRR from check_class_effect? (list each drug=value)\n"
-        f"Q3: Is {drug} PRR 5x+ higher than class average? (calculate the ratio)\n"
-        f"Q4: Trend counts from get_signal_trend? (quote first year → last year)\n\n"
-        f"Output per signal:\n"
-        f"SIGNAL: <name>\n"
-        f"PRR: <value> (n=<count>)\n"
-        f"COMPARATORS: <drug>=<prr>, <drug>=<prr>, ...\n"
-        f"RATIO: {drug} is <X>x the class average\n"
-        f"TREND: <year count> → <year count> (<GROWING/STABLE/EMERGING>)\n"
+        f"Then reason carefully:\n"
+        f"- Calculate {drug}_PRR ÷ weakest_comparator_PRR (not average)\n"
+        f"- If ratio > 5: flag DRUG_SPECIFIC even if class shows some elevation\n"
+        f"- What does the trend say about clinical urgency?\n\n"
+        f"Output per signal (3 lines):\n"
         f"CLASSIFICATION: <CLASS_EFFECT|DRUG_SPECIFIC> | <GROWING|STABLE|EMERGING>"
         f"{'| PERSISTENT' if memory_context else ''}\n"
-        f"REASON: <one sentence — note disproportionality if ratio > 5x>"
+        f"RATIO: {drug} is <X>x weakest comparator (<drug>=<prr>)\n"
+        f"INSIGHT: <one clinical sentence noting disproportionality if ratio > 5>"
     )
 
     print(f"  [invest] investigating {len(targets)} signals: "
