@@ -45,13 +45,31 @@ GOOGLE_API_KEY   = os.getenv("GOOGLE_API_KEY", "")
 # ---------------------------------------------------------------------------
 
 def _model(max_tokens: int = 800) -> ChatOpenAI:
-    """Local Gemma4 via Docker Model Runner."""
+    """Report writing model — Gemma4-E2B (fast prose, no thinking mode)."""
     return ChatOpenAI(
         model=LOCAL_MODEL_NAME,
         base_url=LOCAL_MODEL_URL,
         api_key="docker",
         max_tokens=max_tokens,
         temperature=0,
+    )
+
+
+def _model_no_thinking(max_tokens: int = 500) -> ChatOpenAI:
+    """
+    Qwen3.5 with thinking disabled — for report writing.
+    3x faster than thinking mode, same quality output.
+    chat_template_kwargs={"enable_thinking": False} is the Qwen3 way to disable thinking.
+    Falls back to standard model if Qwen3.5 is not available.
+    """
+    return ChatOpenAI(
+        model=INVESTIGATOR_MODEL,
+        base_url=LOCAL_MODEL_URL,
+        api_key="docker",
+        max_tokens=max_tokens,
+        temperature=0,
+        # extra_body passes custom params through the OpenAI client to llama.cpp
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
 
 
@@ -629,7 +647,7 @@ async def write_report(state: DrugSafetyState) -> dict:
 
     narrative = ""
     try:
-        resp = await _model(max_tokens=500).ainvoke(narrative_prompt)
+        resp = await _model_no_thinking(max_tokens=500).ainvoke(narrative_prompt)
         narrative = resp.content or ""
         if "<think>" in narrative:
             narrative = narrative.split("</think>")[-1].strip()

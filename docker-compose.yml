@@ -4,8 +4,14 @@
 # Then: uv run python main.py semaglutide
 
 models:
-  gemma4:
-    model: ai/gemma4:E4B   # ~4GB download on first run, cached after
+  # Qwen3.5-9B: used for BOTH investigation (thinking on) and report writing (thinking off)
+  # Better reasoning than Gemma4-E4B, same size (5.6GB), llama.cpp backend
+  qwen35:
+    model: ai/qwen3.5:9B-UD-Q4_K_XL
+
+  # For 32GB+ machines: upgrade investigator to Gemma4-31B via vllm-metal
+  # gemma4-31b:
+  #   model: ai/gemma4:31B
 
 services:
   opensearch:
@@ -80,13 +86,18 @@ services:
       - OPENSEARCH_MCP_URL=http://opensearch-mcp:8001
       - PHOENIX_URL=http://phoenix:6006
       - LOCAL_MODEL_URL=http://model-runner.docker.internal/engines/llama.cpp/v1
+      # Qwen3.5-9B for both roles: investigation (thinking=on) + report (thinking=off)
+      - LOCAL_MODEL_NAME=docker.io/ai/qwen3.5:9B-UD-Q4_K_XL
+      - INVESTIGATOR_MODEL=docker.io/ai/qwen3.5:9B-UD-Q4_K_XL
+      # Upgrade investigator to Gemma4-31B: set GOOGLE_API_KEY
+      # - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
     depends_on:
       opensearch:
         condition: service_healthy
       phoenix:
         condition: service_started
     models:
-      - gemma4
+      - qwen35
 
 volumes:
   opensearch_data:
