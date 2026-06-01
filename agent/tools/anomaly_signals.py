@@ -92,6 +92,12 @@ async def get_anomaly_signals(
             max_count = int(b["max_count"]["value"] or 0)
             quarters  = b["quarters_seen"]["value"]
 
+            # Skip 999.0 sentinel values — these mean the reaction is absent
+            # from ALL comparators (no class baseline), making the ratio meaningless.
+            # A real drug-specific signal needs at least one comparator to compare against.
+            if max_ratio >= 999.0:
+                continue
+
             if max_ratio < min_ratio or max_count < min_count:
                 continue
 
