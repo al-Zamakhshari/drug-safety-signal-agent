@@ -68,8 +68,8 @@ async def _run_pipeline_streaming(drug_name: str) -> AsyncIterator[dict]:
         "anomaly_detection": "📈 Querying anomaly detection…",
         "fetch_label":       "📋 Fetching FDA label (openFDA)…",
         "search_lit":        "📚 Searching PubMed literature…",
-        "investigate":       "🔬 Investigating signals (Gemma4 + tools)…",
-        "write_report":      "✍️  Writing briefing (Gemma4)…",
+        "investigate":       "🔬 Investigating signals (Qwen3.5 + tools)…",
+        "write_report":      "✍️  Writing briefing (Qwen3.5)…",
         "save_memory":       "💾 Saving findings to ML Memory…",
     }
 

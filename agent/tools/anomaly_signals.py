@@ -125,7 +125,9 @@ async def get_anomaly_signals(
                 "no_class_baseline": no_class_baseline,
             })
 
-        signals.sort(key=lambda x: -x["max_ratio"])
+        # no_class_baseline signals have max_ratio=None; sort them last (ratio=0)
+        # so finite ratio signals appear first, sentinels appear at the tail.
+        signals.sort(key=lambda x: -(x["max_ratio"] or 0))
         return {
             "drug":         drug,
             "signal_count": len(signals),

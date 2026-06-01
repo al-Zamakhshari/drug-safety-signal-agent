@@ -5,7 +5,7 @@ These are Python functions decorated with @tool — LangChain extracts the
 JSON schema from the type hints and docstring automatically.
 
 Each tool does one focused query against OpenSearch and returns a JSON string.
-The investigator agent (Gemma4 E4B) decides which tools to call and in what order.
+The investigator agent (Qwen3.5-9B, thinking=ON) decides which tools to call and in what order.
 """
 
 import json
