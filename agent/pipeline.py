@@ -111,21 +111,29 @@ def _model_31b():
 
 
 # ---------------------------------------------------------------------------
-# Investigator sub-agent (create_react_agent)
-# Gemma4 E4B with 4 tools — handles its own multi-turn tool-call loop
+# Phase 1 — Grounded investigator: mandatory 3-tool sequence
+# Forces quoting raw tool results to prevent training knowledge substitution
 # ---------------------------------------------------------------------------
 
 _investigator_agent = create_react_agent(
-    _model_31b(),   # 31B via API if GOOGLE_API_KEY set, else local E2B
+    _model_31b(),
+    tools=[get_prr, check_class_effect, get_signal_trend],
+)
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Free-form deep investigator: any tools, any order, thinking=ON
+# Only fires for DRUG_SPECIFIC or ratio > 7 signals (skips routine CLASS_EFFECT)
+# Model decides what to investigate based on Phase 1 findings
+# ---------------------------------------------------------------------------
+
+_deep_investigator_agent = create_react_agent(
+    _model_31b(),   # thinking=ON — model needs to reason about what to explore
     tools=[
-        # Statistical tools (direct Python → OpenSearch)
-        get_prr,                  # confirm PRR for a specific drug+reaction
-        check_class_effect,       # class-wide or drug-specific?
-        get_signal_trend,         # GROWING / STABLE / EMERGING over time
-        # Built-in OS MCP tools — agent discovers and uses freely
-        list_opensearch_tools,    # discover all registered OS MCP tools
-        call_opensearch_tool,     # call any registered OS MCP tool by name
-        # e.g. analyze_reaction_distribution, search_faers, future tools
+        get_prr,                  # verify with different name variants
+        check_class_effect,       # expand comparator set
+        get_signal_trend,         # zoom into specific time periods
+        list_opensearch_tools,    # discover registered OS MCP tools
+        call_opensearch_tool,     # DataDistributionTool, search_faers, etc.
     ],
 )
 
@@ -526,6 +534,56 @@ async def investigate(state: DrugSafetyState) -> dict:
             )
         investigation_text = "\n".join(lines)
         print(f"  [invest] WARNING: model returned empty — using fallback text")
+
+    # ── Phase 2: Free-form deep investigation ───────────────────────────────
+    # Only runs when Phase 1 finds something unusual: DRUG_SPECIFIC or ratio > 7
+    # Model decides which tools to call and in what order — full autonomy.
+    deep_text = ""
+    deep_calls = 0
+
+    interesting = (
+        "DRUG_SPECIFIC" in investigation_text
+        or any(
+            f"{drug} is" in line and any(
+                float(x) > 7.0
+                for x in line.split("x")[0].split("is")[-1].strip().split()
+                if x.replace(".","").isdigit()
+            )
+            for line in investigation_text.split("\n")
+        )
+    )
+
+    if interesting:
+        print(f"  [deep]   interesting signal found — running free-form investigation")
+        deep_prompt = (
+            f"You found these signals for {drug}:\n\n"
+            f"{investigation_text}\n\n"
+            f"At least one is DRUG_SPECIFIC or has a high ratio. "
+            f"Use any tools in any order to dig deeper. You can:\n"
+            f"- Call list_opensearch_tools to discover available OpenSearch tools\n"
+            f"- Use call_opensearch_tool with analyze_reaction_distribution to compare "
+            f"recent vs historical periods\n"
+            f"- Call get_prr with alternative drug name variants\n"
+            f"- Call check_class_effect with different comparators\n"
+            f"- Check related reactions that might explain the pattern\n\n"
+            f"Run up to 5 tool calls. Summarise what you find in 2-3 sentences."
+        )
+        deep_result = await _deep_investigator_agent.ainvoke(
+            {"messages": [("user", deep_prompt)]}
+        )
+        deep_calls = sum(
+            1 for m in deep_result["messages"]
+            if hasattr(m, "tool_calls") and m.tool_calls
+        )
+        last = deep_result["messages"][-1].content
+        if isinstance(last, list):
+            last = " ".join(p.get("text","") for p in last if isinstance(p,dict) and p.get("type")=="text")
+        deep_text = str(last).strip()
+        print(f"  [deep]   {deep_calls} additional tool calls")
+        tool_calls += deep_calls
+
+    if deep_text:
+        investigation_text += f"\n\n**Deep investigation ({deep_calls} additional tool calls):**\n{deep_text}"
 
     # Structure the output
     investigation = [{
