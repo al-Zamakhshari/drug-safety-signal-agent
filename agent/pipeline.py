@@ -510,8 +510,35 @@ async def investigate(state: DrugSafetyState) -> dict:
 
     drug = state["drug_names"][0]
     reactions_str = ", ".join(f"{s['reaction']} (PRR={s['prr']})" for s in targets)
-    comparators = ["LIRAGLUTIDE", "DULAGLUTIDE", "TIRZEPATIDE", "EXENATIDE"]
-    comparators = [c for c in comparators if c not in state["drug_names"]][:3]
+
+    # Derive comparators from config/comparators.yaml for this drug.
+    # Falls back to an empty list (the investigator will still run — it just
+    # won't have a class_effect check context). Far better than hardcoding
+    # GLP-1 comparators for every drug, which would compare rofecoxib against
+    # semaglutide (scientifically wrong).
+    comparators: list[str] = []
+    try:
+        from pathlib import Path
+        import yaml as _yaml
+        _cfg_path = Path(__file__).parent.parent / "config" / "comparators.yaml"
+        if _cfg_path.exists():
+            _cfg = _yaml.safe_load(_cfg_path.read_text()) or {}
+            # Find the entry whose names list contains this drug
+            drug_upper = drug.upper()
+            for _entry in _cfg.values():
+                if drug_upper in [n.upper() for n in _entry.get("names", [])]:
+                    # Flatten comparator groups → unique names, exclude this drug
+                    seen: set[str] = set(n.upper() for n in _entry.get("names", []))
+                    for grp in _entry.get("comparators", []):
+                        for n in grp:
+                            nu = n.upper()
+                            if nu not in seen:
+                                comparators.append(nu)
+                                seen.add(nu)
+                    break
+    except Exception:
+        pass
+    comparators = comparators[:3]  # top 3 to keep the prompt concise
 
     # Include ML Memory context — prior run findings
     memory_context = ""

@@ -26,21 +26,37 @@ from ingestion.faers_indexer import MAPPING, INDEX, _client
 
 load_dotenv()
 
-DEFAULT_DRUGS = {
-    "SEMAGLUTIDE", "OZEMPIC", "WEGOVY", "RYBELSUS",
-    "LIRAGLUTIDE", "VICTOZA", "SAXENDA",
-    "DULAGLUTIDE", "TRULICITY",
-    "TIRZEPATIDE", "MOUNJARO", "ZEPBOUND",
-    "EXENATIDE", "BYETTA", "BYDUREON",
-    "EMPAGLIFLOZIN", "JARDIANCE",
-    "DAPAGLIFLOZIN", "FARXIGA",
-    "SITAGLIPTIN", "JANUVIA",
-    "METFORMIN", "GLUCOPHAGE",
-    "ROFECOXIB", "CELECOXIB", "IBUPROFEN", "NAPROXEN",
-    "ATORVASTATIN", "LISINOPRIL", "AMLODIPINE", "LOSARTAN",
-    "METOPROLOL", "ASPIRIN", "WARFARIN", "OMEPRAZOLE",
-    "LEVOTHYROXINE", "GABAPENTIN", "SERTRALINE", "AMOXICILLIN",
-}
+def _load_default_drugs() -> set[str]:
+    """
+    Derive the default drug filter set from config/comparators.yaml.
+    Includes the index drugs AND all their comparators so the full
+    within-class comparison is supported without re-filtering.
+    Falls back to a minimal hardcoded set if the config is absent.
+    """
+    from pathlib import Path
+    import yaml as _yaml
+    cfg_path = Path(__file__).parent.parent / "config" / "comparators.yaml"
+    if cfg_path.exists():
+        try:
+            cfg = _yaml.safe_load(cfg_path.read_text()) or {}
+            drugs: set[str] = set()
+            for entry in cfg.values():
+                drugs.update(n.upper() for n in entry.get("names", []))
+                for grp in entry.get("comparators", []):
+                    drugs.update(n.upper() for n in grp)
+            if drugs:
+                return drugs
+        except Exception:
+            pass
+    # Fallback: keep a minimal set so --all-drugs works even without the YAML
+    return {
+        "SEMAGLUTIDE", "OZEMPIC", "WEGOVY", "RYBELSUS",
+        "ROFECOXIB", "VIOXX", "CELECOXIB", "IBUPROFEN", "NAPROXEN",
+        "LIRAGLUTIDE", "VICTOZA", "SAXENDA",
+    }
+
+
+DEFAULT_DRUGS = _load_default_drugs()
 
 
 def _read_df(zf: zipfile.ZipFile, prefix: str) -> pl.DataFrame | None:
