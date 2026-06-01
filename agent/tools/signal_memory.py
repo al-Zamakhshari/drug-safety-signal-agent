@@ -167,6 +167,7 @@ _RUNS_MAPPING = {
             "reaction":   {"type": "keyword"},
             "prr":        {"type": "float"},
             "prr_lower":  {"type": "float"},
+            "prr_upper":  {"type": "float"},   # needed for CI-overlap lifecycle test
             "drug_count": {"type": "integer"},
             "effect":     {"type": "keyword"},   # CLASS_EFFECT | DRUG_SPECIFIC | None
             "trend":      {"type": "keyword"},   # GROWING | STABLE | EMERGING | None
@@ -181,8 +182,9 @@ _RUNS_MAPPING = {
 async def save_run_signals(drug: str, signals: list[dict]) -> None:
     """
     Persist one structured run document per drug.
-    Each signal carries: reaction, prr, prr_lower, drug_count,
+    Each signal carries: reaction, prr, prr_lower, prr_upper, drug_count,
     effect (from Phase-1 classifier), trend, labeled, status (NEW/VALIDATED/DISMISSED).
+    Logs a warning if persistence fails — never raises (supplemental store).
     """
     await _os_put_index(_RUNS_INDEX, _RUNS_MAPPING)
     doc = {
@@ -192,12 +194,14 @@ async def save_run_signals(drug: str, signals: list[dict]) -> None:
     }
     try:
         async with httpx.AsyncClient(verify=False, timeout=15) as client:
-            await client.post(
+            r = await client.post(
                 f"{BASE}/{_RUNS_INDEX}/_doc",
                 auth=AUTH, headers=HDR, json=doc,
             )
-    except Exception:
-        pass   # structured store is supplemental — never block the pipeline
+            if r.status_code >= 300:
+                print(f"  [status] WARNING: run persistence failed HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"  [status] WARNING: run persistence failed: {e}")
 
 
 async def load_last_run(drug: str) -> dict | None:

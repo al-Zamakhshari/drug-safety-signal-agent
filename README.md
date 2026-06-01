@@ -27,7 +27,7 @@ Detects drug safety signals from FDA FAERS adverse event reports using a fully l
 | Within-class comparison | Mantel–Haenszel stratified rate ratio + CI | OpenSearch faers_ml_rates |
 | Label cross-reference | MedDRA LLT-expanded, negation-aware token-overlap | openFDA API |
 | Literature evidence | PubMed search | NCBI eUtils |
-| Investigation | Two-phase function calling — class effect / trend / DDI | Qwen3.5-9B |
+| Investigation | Two-phase function calling — class effect / trend / temporal emergence | Qwen3.5-9B |
 | Signal memory | Cross-run persistence | OpenSearch ML Memory (3.6+) |
 | Web interface | Real-time streaming briefing | FastAPI + SSE |
 
@@ -77,15 +77,18 @@ flowchart TD
 
     R2{PRR ≥ 5\nAND robust CI\nAND FDR q < 0.05\nAND unlabeled?}
     R2 -->|Yes| INV
-    R2 -->|No| WR
+    R2 -->|No| CS
 
     INV["🔬 investigate\nQwen3.5-9B  thinking=ON\nPhase 1: grounded tool calls\nPhase 2: free-form exploration"]
-    INV --> WR
+    INV --> CS
+
+    CS["🔁 classify_signals\nCross-run lifecycle diff\nNEW · VALIDATED · DISMISSED\nCI-overlap test vs prior run\nagent-signal-runs index"]
+    CS --> WR
 
     WR["✍️ write_report\nQwen3.5-9B  thinking=OFF\nnarrative prose only\nnumbers never re-typed by model"]
     WR --> SM
 
-    SM["💾 save_memory\nOpenSearch ML Memory\npersist findings for next run"]
+    SM["💾 save_memory\nOpenSearch ML Memory\npersist text trail for next run"]
     SM --> out([Briefing])
 
     style PRR fill:#dbeafe,stroke:#3b82f6
@@ -94,6 +97,7 @@ flowchart TD
     style SL fill:#dbeafe,stroke:#3b82f6
     style RN fill:#dbeafe,stroke:#3b82f6
     style LM fill:#dbeafe,stroke:#3b82f6
+    style CS fill:#dbeafe,stroke:#3b82f6
     style SM fill:#dbeafe,stroke:#3b82f6
     style INV fill:#fef3c7,stroke:#f59e0b
     style WR fill:#fef3c7,stroke:#f59e0b
@@ -412,14 +416,43 @@ Var[ln RR_MH] = Σ P_k R_k / (2R²) + Σ(P_k S_k + Q_k R_k)/(2RS) + Σ Q_k S_k /
 
 ---
 
+## Cross-run Signal Lifecycle
+
+Every pipeline run classifies each signal as **NEW**, **VALIDATED**, or **DISMISSED** by comparing against the prior run's stored data.
+
+```
+NEW        — reaction not seen in any prior run for this drug
+VALIDATED  — 95% CIs overlap: the change from prior to current PRR is within
+             sampling noise — the signal persists
+DISMISSED  — current upper CI is entirely below prior lower CI:
+             the signal has genuinely collapsed, not just fluctuated
+```
+
+The comparison uses a **CI-overlap test** rather than a bare percentage cliff — PRR 8.0→3.9 can still be VALIDATED if the confidence intervals overlap, while a true collapse (current upper bound < prior lower bound) triggers DISMISSED regardless of the ratio.
+
+Per-run structured state (drug, run_ts, per-reaction PRR + CIs + effect + trend + status) is persisted to the `agent-signal-runs` OpenSearch index. The next run loads this via `load_last_run()` and passes per-reaction PRR trajectory deltas to the Phase-1 investigator prompt:
+
+```
+PRIOR RUN SIGNAL TRAJECTORY:
+  PANCREATITIS: DRUG_SPECIFIC PRR=8.2→9.1 (+11%) | PERSISTENT
+  NAUSEA: CLASS_EFFECT PRR=4.3→4.5 (+5%)
+  BLOOD_GLUCOSE_DECR: DRUG_SPECIFIC PRR=6.0 last run → RESOLVED (gone)
+```
+
+This lets the investigator reason about trajectory — whether a signal is newly emerging, persistently elevated, or resolving — not just its current point estimate.
+
+The report header summarises the lifecycle for the run: `NEW=2 · VALIDATED=5 · DISMISSED=1`. PRR table reaction labels carry status badges: 🆕 (NEW), ✅ (VALIDATED), 📉 (DISMISSED).
+
+---
+
 ## OpenSearch 3.6.0 Features Used
 
 | Feature | API | Purpose |
 |---------|-----|---------|
 | `filters` aggregation | standard | Per-reaction baseline without top-N truncation |
-| ML Memory | `/_plugins/_ml/memory` | Signal registry — PERSISTENT tags across runs |
-| DataDistributionTool | `/_plugins/_ml/tools/_execute/DataDistributionTool` | Time-period emergence detection |
-| Built-in MCP server | `/_plugins/_ml/mcp` | Free-form investigation in Phase 2 |
+| ML Memory | `/_plugins/_ml/memory` | Human-readable text trail across runs |
+| `agent-signal-runs` index | standard | Structured per-run signal state for CI-overlap lifecycle diff |
+| Built-in MCP server | `/_plugins/_ml/mcp` | Free-form investigation tools in Phase 2 |
 
 ---
 

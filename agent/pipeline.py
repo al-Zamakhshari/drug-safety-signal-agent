@@ -356,9 +356,10 @@ def _label_match_display(
 # Phase-1 output parser — robust structured extraction
 # ---------------------------------------------------------------------------
 
-# Tokens expected on the CLASSIFICATION line
-_EFFECT_TOKENS = {"CLASS_EFFECT", "DRUG_SPECIFIC"}
-_TREND_TOKENS  = {"GROWING", "STABLE", "EMERGING"}
+# Tokens expected on the CLASSIFICATION line.
+# Ordered tuples — DRUG_SPECIFIC first so it wins when both tokens appear in one line.
+_EFFECT_TOKENS = ("DRUG_SPECIFIC", "CLASS_EFFECT")
+_TREND_TOKENS  = ("GROWING", "EMERGING", "STABLE")
 
 
 def _parse_classification(reaction: str, text: str) -> dict:
@@ -379,7 +380,9 @@ def _parse_classification(reaction: str, text: str) -> dict:
     m = re.search(r"CLASSIFICATION:\s*([^\n]+)", text, re.IGNORECASE)
     if m:
         line = m.group(1).upper()
-        if "[" not in line:   # real output, not template echo
+        # Reject template echoes: the alternation pattern [X|Y|Z] (with | inside brackets)
+        # but allow real output that incidentally contains [] e.g. "DRUG_SPECIFIC [confirmed]"
+        if not re.search(r"\[[A-Z_]+\|", line):
             for tok in _EFFECT_TOKENS:
                 if re.search(rf"\b{tok}\b", line):
                     out["effect"] = tok
@@ -563,7 +566,8 @@ async def search_lit(state: DrugSafetyState) -> dict:
 async def investigate(state: DrugSafetyState) -> dict:
     """
     Qwen3.5-9B (thinking=ON) investigates the top novel signals using function calling.
-    Runs get_prr, check_class_effect, check_ddi, get_signal_trend autonomously.
+    Runs get_prr, check_class_effect, get_signal_trend autonomously (Phase 1).
+    Phase 2 adds compare_time_periods, list_opensearch_tools, call_opensearch_tool.
     Returns structured classification for each investigated signal.
     """
     label_text     = state.get("label_text", "")
@@ -786,11 +790,16 @@ async def classify_signals(state: DrugSafetyState) -> dict:
     Diffs current PRR signals against the prior run to assign:
       NEW        — reaction not seen in any prior run
       VALIDATED  — seen in prior run, PRR still elevated (≥50% of prior value)
-      DISMISSED  — was flagged before, PRR has collapsed (<50% of prior value)
+      DISMISSED  — prior signal confirmed gone: current upper CI is entirely below
+                   the prior lower CI (genuine collapse, not sampling noise)
 
-    Persists the structured run document for the next run to diff against.
-    Runs whether or not investigation fired — tracks all PRR signals, not just
-    the investigated ones.
+    Uses a CI-overlap test when both runs have confidence intervals:
+      VALIDATED when CIs overlap (change is within sampling noise)
+      DISMISSED only when current upper CI < prior lower CI (genuine collapse)
+      Falls back to a 50% point-estimate rule when CIs are absent.
+
+    Persists the structured run document (including prr_upper) for the next
+    run to diff against. Never raises — logs its own failures.
     """
     prior_run = state.get("_prior_run")
     prior_map = {s["reaction"]: s for s in (prior_run.get("signals", []) if prior_run else [])}
@@ -803,20 +812,33 @@ async def classify_signals(state: DrugSafetyState) -> dict:
         rxn   = s["reaction"]
         p     = prior_map.get(rxn)
         c     = cls_map.get(rxn, {})
-        p_prr = (p.get("prr") or 0) if p else 0
         c_prr = s["prr"]
+        p_prr = (p.get("prr") or 0) if p else 0
 
         if p is None:
             status = "NEW"
-        elif c_prr >= p_prr * 0.5:
-            status = "VALIDATED"
         else:
-            status = "DISMISSED"
+            # CI-overlap test: use prr_lower/prr_upper from both runs when available
+            c_lo = s.get("prr_lower")
+            c_up = s.get("prr_upper")
+            p_lo = p.get("prr_lower")
+            p_up = p.get("prr_upper")
+
+            if None in (c_lo, c_up, p_lo, p_up):
+                # CI absent on one run — fall back to 50% point-estimate rule
+                status = "VALIDATED" if c_prr >= p_prr * 0.5 else "DISMISSED"
+            elif c_up < p_lo:
+                # Current CI entirely below prior CI → genuine signal collapse
+                status = "DISMISSED"
+            else:
+                # CIs overlap (current may be higher or slightly lower) → signal persists
+                status = "VALIDATED"
 
         signal_status.append({
             "reaction":   rxn,
             "prr":        c_prr,
             "prr_lower":  s.get("prr_lower"),
+            "prr_upper":  s.get("prr_upper"),   # persisted so next run can do CI overlap
             "drug_count": s["drug_count"],
             "effect":     c.get("effect"),
             "trend":      c.get("trend"),
@@ -825,11 +847,8 @@ async def classify_signals(state: DrugSafetyState) -> dict:
             "prr_prior":  p_prr if p else None,
         })
 
-    # Persist structured run doc (non-blocking)
-    try:
-        await save_run_signals(state["drug_name"], signal_status)
-    except Exception:
-        pass
+    # Persist structured run doc — save_run_signals logs its own failures, never raises
+    await save_run_signals(state["drug_name"], signal_status)
 
     new_count  = sum(1 for s in signal_status if s["status"] == "NEW")
     val_count  = sum(1 for s in signal_status if s["status"] == "VALIDATED")
