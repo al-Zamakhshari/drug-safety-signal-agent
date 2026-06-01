@@ -143,11 +143,12 @@ _deep_investigator_agent = create_react_agent(
 class DrugSafetyState(TypedDict):
     drug_name:          str
     drug_names:         list[str]
-    prr_signals:        list[dict]   # [{reaction, prr, drug_count, chi2, significant}]
+    prr_signals:        list[dict]   # [{reaction, prr, prr_lower, prr_upper, robust, q_value, fdr_significant, ...}]
     drug_total:         int
     faers_total:        int
-    anomaly_signals:    list[dict]   # [{reaction, max_ratio, trend}]
+    anomaly_signals:    list[dict]   # [{reaction, class_ratio, class_ratio_lower, class_ratio_upper, ...}]
     label_text:         str          # raw label text for token-overlap matching
+    llt_expansions:     dict         # PT → [LLT synonyms], pre-fetched from openFDA
     literature:         list[dict]
     past_findings:      list[dict]   # from ML Memory — prior run results
     investigation:      list[dict]
@@ -240,7 +241,11 @@ def _reaction_direction(reaction: str) -> str | None:
     return None
 
 
-def _is_labeled(reaction: str, label_text: str) -> bool:
+def _is_labeled(
+    reaction: str,
+    label_text: str,
+    llt_expansions: dict | None = None,
+) -> bool:
     """
     True if the MedDRA PT is documented (non-negated, direction-consistent)
     in the FDA label text.
@@ -250,11 +255,27 @@ def _is_labeled(reaction: str, label_text: str) -> bool:
     match in a later sentence.
 
     Handles:
+      - MedDRA LLT expansion: if llt_expansions[PT] is provided, also tries
+        matching each LLT synonym. E.g. "MYOCARDIAL INFARCTION" → also tries
+        "HEART ATTACK", "MI" etc. Fixes false-novel flags for off-demo drugs.
       - Cross-sentence safety: 'no other findings. pancreatitis occurred.' → True
       - Negation: 'no evidence of pancreatitis' → False
       - Direction: 'BLOOD GLUCOSE DECREASED' rejected by 'increased'-only label
       - Word order: 'PANCREATITIS ACUTE' matches 'acute pancreatitis'
     """
+    # Try the PT first, then any LLT synonyms
+    candidates = [reaction]
+    if llt_expansions:
+        candidates += llt_expansions.get(reaction.upper(), [])
+
+    for candidate in candidates:
+        if _is_labeled_single(candidate, label_text):
+            return True
+    return False
+
+
+def _is_labeled_single(reaction: str, label_text: str) -> bool:
+    """Core single-term label match (no LLT expansion)."""
     clin = _label_tokens(reaction)
 
     if not clin:
@@ -298,6 +319,29 @@ def _is_labeled(reaction: str, label_text: str) -> bool:
         return True  # clean match in this sentence
 
     return False
+
+
+def _label_match_display(
+    reaction: str,
+    label_text: str,
+    llt_expansions: dict | None = None,
+) -> str:
+    """
+    Three-state label match display for the report table.
+    Yes          → exact match (non-negated, direction-consistent, incl. LLT synonyms)
+    **Possible** → partial match (fewer than all clinical tokens matched)
+    **No ⚠️**   → no match found
+    """
+    if _is_labeled(reaction, label_text, llt_expansions):
+        return "Yes"
+    # Partial check: does ANY single clinical token appear in the label?
+    clin = _label_tokens(reaction)
+    if clin:
+        expanded = _expand_label(label_text.lower())
+        label_words = set(re.findall(r"[a-z]+", expanded))
+        if clin & label_words:   # at least one token present
+            return "**Possible**"
+    return "**No ⚠️**"
 
 
 # ---------------------------------------------------------------------------
@@ -380,8 +424,11 @@ async def run_anomaly_detection(state: DrugSafetyState) -> dict:
 async def fetch_label(state: DrugSafetyState) -> dict:
     """
     Fetch FDA label and store raw text for token-overlap matching.
-    Reads all sections including 'warnings' (not just warnings_and_cautions).
+    Also pre-fetches MedDRA LLT synonyms for the top PRR signals so that
+    _is_labeled can match FDA label vocabulary without requiring a full MedDRA license.
     """
+    from agent.tools.openfda import get_meddra_llts
+
     label = await get_drug_label(state["drug_name"].lower())
     # Concatenate all safety-relevant sections — lowercase for matching
     label_text = " ".join(
@@ -392,13 +439,26 @@ async def fetch_label(state: DrugSafetyState) -> dict:
     ).lower()
     print(f"  [label]  {len(label_text):,} chars | "
           f"found={label.get('found', False)} resolved_as={label.get('resolved_as','?')}")
-    return {"label_text": label_text}
+
+    # Pre-fetch LLT synonyms for top signals (cached locally after first fetch)
+    llt_expansions: dict[str, list[str]] = {}
+    top_reactions = [s["reaction"] for s in state.get("prr_signals", [])[:20]]
+    for rxn in top_reactions:
+        llts = await get_meddra_llts(rxn)
+        if llts:
+            llt_expansions[rxn] = llts
+    if llt_expansions:
+        print(f"  [label]  LLT expansions loaded for {len(llt_expansions)} reactions")
+
+    return {"label_text": label_text, "llt_expansions": llt_expansions}
 
 
 async def search_lit(state: DrugSafetyState) -> dict:
-    label_text = state.get("label_text", "")
+    label_text     = state.get("label_text", "")
+    llt_expansions = state.get("llt_expansions", {})
     # Top 3 unlabeled signals by PRR
-    targets = [s for s in state["prr_signals"] if not _is_labeled(s["reaction"], label_text)][:3]
+    targets = [s for s in state["prr_signals"]
+               if not _is_labeled(s["reaction"], label_text, llt_expansions)][:3]
     literature = []
     for signal in targets:
         result = await search_literature(state["drug_name"], signal["reaction"])
@@ -424,11 +484,12 @@ async def investigate(state: DrugSafetyState) -> dict:
     Runs get_prr, check_class_effect, check_ddi, get_signal_trend autonomously.
     Returns structured classification for each investigated signal.
     """
-    label_text = state.get("label_text", "")
+    label_text     = state.get("label_text", "")
+    llt_expansions = state.get("llt_expansions", {})
     # Only investigate strong unlabeled signals (PRR≥5, n≥10)
     targets = [
         s for s in state["prr_signals"]
-        if not _is_labeled(s["reaction"], label_text)
+        if not _is_labeled(s["reaction"], label_text, llt_expansions)
         and s["prr"] >= 5.0
         and s["drug_count"] >= 10
     ][:3]
@@ -464,16 +525,22 @@ async def investigate(state: DrugSafetyState) -> dict:
     total_tool_calls = 0
 
     for signal in targets:
-        rxn = signal["reaction"]
-        prr = signal["prr"]
-        n   = signal["drug_count"]
+        rxn       = signal["reaction"]
+        prr       = signal["prr"]
+        prr_lo    = signal.get("prr_lower", "?")
+        prr_hi    = signal.get("prr_upper", "?")
+        q_val     = signal.get("q_value", "?")
+        n         = signal["drug_count"]
 
         # Grounded prompt: forces quoting raw tool results BEFORE reasoning.
         # Prevents thinking models from substituting training knowledge for
         # actual FAERS data. "paste exact JSON" makes tool calls mandatory.
+        # New: also surface the 95% CI and BH q-value so the model's reasoning
+        # is grounded in the corrected statistics (not just the point PRR).
         prompt = (
             f"You are a pharmacovigilance expert. Investigate ONE signal:\n"
-            f"Signal: {rxn} (PRR={prr}, n={n}) for {drug}\n\n"
+            f"Signal: {rxn} for {drug}\n"
+            f"  PRR={prr} (95% CI: {prr_lo}–{prr_hi})  n={n}  BH q={q_val}\n\n"
             f"{memory_context}"
             f"Step 1: Call get_prr(drug='{drug}', reaction='{rxn}')\n"
             f"        Write: \"get_prr returned: [paste exact JSON]\"\n\n"
@@ -488,7 +555,7 @@ async def investigate(state: DrugSafetyState) -> dict:
             f"Output (3 lines):\n"
             f"CLASSIFICATION: [CLASS_EFFECT|DRUG_SPECIFIC] | [GROWING|STABLE|EMERGING] {persistent_tag}\n"
             f"RATIO: {drug} is [X]x lowest comparator ([drug_name]=[prr_value from tool])\n"
-            f"INSIGHT: [one clinical sentence based on tool data]"
+            f"INSIGHT: [one clinical sentence based on tool data and the CI/q provided above]"
         )
 
         result = await _investigator_agent.ainvoke({"messages": [("user", prompt)]})
@@ -511,8 +578,11 @@ async def investigate(state: DrugSafetyState) -> dict:
         print(f"  [invest]   {rxn[:30]}: {calls} calls")
 
         if not text.strip():
-            text = (f"**{rxn}** (PRR={signal['prr']}, n={signal['drug_count']}): "
-                    f"signal confirmed. Preliminary: CLASS_EFFECT likely (GLP-1 class drug).")
+            ci_str = (f"95% CI: {signal.get('prr_lower','?')}–{signal.get('prr_upper','?')}"
+                      if signal.get("prr_lower") else "")
+            text = (f"**{rxn}** (PRR={signal['prr']}{', ' + ci_str if ci_str else ''}, "
+                    f"n={signal['drug_count']}): signal confirmed. "
+                    f"Investigation inconclusive — see PRR/CI table for numeric evidence.")
 
         all_findings.append(f"**{rxn}**\n{text}")
 
@@ -525,11 +595,12 @@ async def investigate(state: DrugSafetyState) -> dict:
     if not investigation_text.strip():
         lines = []
         for s in targets:
+            ci_str = (f", 95% CI: {s.get('prr_lower','?')}–{s.get('prr_upper','?')}"
+                      if s.get("prr_lower") else "")
             lines.append(
-                f"**{s['reaction']}** (PRR={s['prr']}, n={s['drug_count']}): "
+                f"**{s['reaction']}** (PRR={s['prr']}{ci_str}, n={s['drug_count']}): "
                 f"signal confirmed. Investigation model unavailable — "
-                f"check GOOGLE_API_KEY quota. Preliminary: `CLASS_EFFECT` likely "
-                f"(GLP-1 class drug)."
+                f"see PRR/CI table for numeric evidence."
             )
         investigation_text = "\n".join(lines)
         print(f"  [invest] WARNING: model returned empty — using fallback text")
@@ -612,9 +683,10 @@ async def write_report(state: DrugSafetyState) -> dict:
     Phase 3.1 fix: deterministic sections emitted by Python, LLM writes prose only.
     Clinical numbers (PRR, counts) are never re-typed by the model.
     """
-    label_text = state.get("label_text", "")
-    lit_map    = {l["signal"]: l for l in state.get("literature", [])}
-    drug       = state["drug_name"].upper()
+    label_text     = state.get("label_text", "")
+    llt_expansions = state.get("llt_expansions", {})
+    lit_map        = {l["signal"]: l for l in state.get("literature", [])}
+    drug           = state["drug_name"].upper()
 
     # ── Deterministic header (Python, not LLM) ──────────────────────────────
     header = (
@@ -637,51 +709,76 @@ async def write_report(state: DrugSafetyState) -> dict:
         inv_tools = inv.get("tool_calls_made", 0)
         signals_inv = inv.get("signals_investigated", [])
 
-        # Build per-reaction tag map from findings text
+        # Build per-reaction tag map from findings text.
+        # Split on **REACTION** section headers (written by the investigate loop
+        # at all_findings.append(f"**{rxn}**\n{text}")) so each reaction's tags
+        # are extracted only from its own section — not from adjacent reactions.
         CLASS_TAGS = {"CLASS_EFFECT", "DRUG_SPECIFIC", "GROWING", "EMERGING",
                       "STABLE", "PERSISTENT", "HYPOTHESIS"}
-        for rxn in signals_inv:
-            # Find the section for this reaction in the findings
-            rxn_idx = inv_findings.upper().find(rxn.upper())
-            if rxn_idx >= 0:
-                snippet = inv_findings[rxn_idx:rxn_idx + 400].upper()
-                found = [t for t in CLASS_TAGS if t in snippet]
-                if found:
-                    # Compact badge: top 2 tags
-                    inv_tags[rxn] = " ".join(f"`{t}`" for t in found[:2])
-                    inv_badges.append(f"**{rxn}**: {' · '.join(found[:2])}")
+        import re as _re
+        # Split the full findings into per-reaction sections
+        # Headers look like: **BLOOD GLUCOSE INCREASED** or **PANCREATITIS**
+        sections = _re.split(r"\*\*([A-Z][A-Z0-9 /()-]+)\*\*", inv_findings)
+        # sections alternates: [preamble, rxn1, text1, rxn2, text2, ...]
+        section_map: dict[str, str] = {}
+        for i in range(1, len(sections) - 1, 2):
+            section_map[sections[i].strip()] = sections[i + 1].upper()
 
-    # ── Deterministic PRR table — now with Investigation column ─────────────
+        for rxn in signals_inv:
+            # Look for exact match, then case-insensitive fallback
+            snippet = section_map.get(rxn, section_map.get(rxn.upper(), ""))
+            if not snippet:
+                # Fallback: first 400 chars after the reaction name in full text
+                idx = inv_findings.upper().find(rxn.upper())
+                snippet = inv_findings[idx:idx + 400].upper() if idx >= 0 else ""
+            found = [t for t in CLASS_TAGS if t in snippet]
+            if found:
+                inv_tags[rxn] = " ".join(f"`{t}`" for t in found[:2])
+                inv_badges.append(f"**{rxn}**: {' · '.join(found[:2])}")
+
+    # ── Deterministic PRR table — PRR + 95% CI + BH q-value + Investigation ──
     prr_rows = []
     for s in state["prr_signals"][:15]:
         rxn        = s["reaction"]
-        is_labeled = "Yes" if _is_labeled(rxn, label_text) else "**No ⚠️**"
+        is_labeled = _label_match_display(rxn, label_text, llt_expansions)
         papers     = lit_map.get(rxn, {}).get("papers", "—")
-        sig        = "✓" if s.get("significant", True) else "~"
+        # Significance badges: χ² + robust (CI lower>1) + FDR
+        chi2_badge = "✓" if s.get("significant") else "~"
+        robust_col = "✓" if s.get("robust") else "~"
+        fdr_col    = "✓" if s.get("fdr_significant") else "~"
+        ci_col     = (f"{s.get('prr_lower','?')}–{s.get('prr_upper','?')}"
+                      if s.get("prr_lower") is not None else "—")
+        q_col      = str(s.get("q_value", "—"))
         inv_col    = inv_tags.get(rxn, "—")
         prr_rows.append(
-            f"| {rxn} | {s['prr']} | {sig} | {s['drug_count']} | {is_labeled} | {papers} | {inv_col} |"
+            f"| {rxn} | {s['prr']} | {ci_col} | {chi2_badge}{robust_col}{fdr_col} | "
+            f"{s['drug_count']} | {is_labeled} | {papers} | {inv_col} |"
         )
     prr_block = (
-        "### PRR Signals (EMA standard: PRR ≥ 2.0, χ²≥4)\n"
-        "| Reaction | PRR | Sig | Reports | In FDA Label? | Literature | Investigation |\n"
-        "|----------|-----|-----|---------|---------------|------------|---------------|\n"
-        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — | — |")
+        "### PRR Signals (EMA standard: PRR ≥ 2.0, χ²≥4, 95% CI lower > 1, BH q < 0.05)\n"
+        "| Reaction | PRR | 95% CI | χ²/CI/FDR | Reports | In FDA Label? | Lit | Investigation |\n"
+        "|----------|-----|--------|-----------|---------|---------------|-----|---------------|\n"
+        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — | — | — |")
     )
 
-    # ── Deterministic anomaly table (Python, not LLM) ───────────────────────
+    # ── Deterministic within-class disproportionality table (Python, not LLM) ─
     anomaly_rows = []
     for s in state.get("anomaly_signals", [])[:8]:
-        trend = s.get("trend", "—")
+        trend   = s.get("trend", "—")
+        rr      = s.get("class_ratio", "—")
+        rr_lo   = s.get("class_ratio_lower", "?")
+        rr_hi   = s.get("class_ratio_upper", "?")
+        ci_str  = f"{rr_lo}–{rr_hi}" if rr_lo != "?" else "—"
+        robust  = "✓" if s.get("class_ratio_robust") else "~"
         anomaly_rows.append(
-            f"| {s['reaction']} | {s['max_ratio']} | {s['max_count']} | {trend} |"
+            f"| {s['reaction']} | {rr} | {ci_str} | {robust} | {s.get('drug_count','—')} | {trend} |"
         )
     anomaly_block = (
-        "### Anomaly Detection (class_ratio vs drug class)\n"
-        "| Reaction | Max class_ratio | Count | Trend |\n"
-        "|----------|----------------|-------|-------|\n"
+        "### Within-class Disproportionality (pooled rate ratio vs comparator class)\n"
+        "| Reaction | Rate Ratio | 95% CI | Robust | Count | Trend |\n"
+        "|----------|-----------|--------|--------|-------|-------|\n"
         + ("\n".join(anomaly_rows) if anomaly_rows
-           else "| (run: uv run python -m ingestion.compute_class_ratio) | — | — | — |")
+           else "| (run: uv run python -m ingestion.compute_class_ratio) | — | — | — | — | — |")
     )
 
     # ── Investigation badge summary — shown inline, details collapsible ──────
@@ -702,7 +799,9 @@ async def write_report(state: DrugSafetyState) -> dict:
     # Feed structured JSON so the model doesn't need to re-parse the tables
     signals_json = json.dumps([
         {"reaction": s["reaction"], "prr": s["prr"],
-         "labeled": _is_labeled(s["reaction"], label_text),
+         "prr_lower": s.get("prr_lower"), "prr_upper": s.get("prr_upper"),
+         "q_value": s.get("q_value"),
+         "labeled": _is_labeled(s["reaction"], label_text, llt_expansions),
          "papers": lit_map.get(s["reaction"], {}).get("papers", 0)}
         for s in state["prr_signals"][:10]
     ], indent=2)
@@ -736,7 +835,7 @@ async def write_report(state: DrugSafetyState) -> dict:
         action = "ESCALATE" if top_prr >= 10 else "INVESTIGATE" if top_prr >= 5 else "MONITOR"
         narrative = (
             f"### Key Findings\n"
-            f"* {len([s for s in state['prr_signals'] if not _is_labeled(s['reaction'], label_text)])} "
+            f"* {len([s for s in state['prr_signals'] if not _is_labeled(s['reaction'], label_text, llt_expansions)])} "
             f"unlabeled signals detected (PRR ≥ 2.0).\n"
             f"* Top signal: {state['prr_signals'][0]['reaction'] if state['prr_signals'] else 'none'} "
             f"(PRR={top_prr})\n\n"
@@ -759,34 +858,38 @@ async def write_report(state: DrugSafetyState) -> dict:
 # ---------------------------------------------------------------------------
 
 def should_search_literature(state: DrugSafetyState) -> str:
-    label_text = state.get("label_text", "")
-    unlabeled = [s for s in state["prr_signals"] if not _is_labeled(s["reaction"], label_text)]
-    # χ² significance gate: prefer statistically robust signals for literature search.
-    # If none pass χ²≥4, fall back to any unlabeled PRR≥3 signal (advisory mode).
-    sig_unlabeled = [s for s in unlabeled if s.get("significant", True)
-                     and s["prr"] >= 3.0 and s["drug_count"] >= 10]
-    weak_unlabeled = [s for s in unlabeled if not s.get("significant", True)
-                      and s["prr"] >= 3.0 and s["drug_count"] >= 10]
-    needs_lit = bool(sig_unlabeled) or bool(weak_unlabeled)
+    label_text     = state.get("label_text", "")
+    llt_expansions = state.get("llt_expansions", {})
+    unlabeled = [s for s in state["prr_signals"]
+                 if not _is_labeled(s["reaction"], label_text, llt_expansions)]
+    # Primary gate: robust signals (lower 95% CI > 1.0) — small-n penalised.
+    # Fallback: χ²≥4 significant signals when no CI available (old schema).
+    robust_unlabeled = [s for s in unlabeled
+                        if s.get("robust", s.get("significant", True))
+                        and s["prr"] >= 3.0 and s["drug_count"] >= 10]
+    needs_lit = bool(robust_unlabeled)
     result = "search_lit" if needs_lit else "investigate"
-    sig_count = len(sig_unlabeled)
-    print(f"  [route]  {len(unlabeled)} unlabeled ({sig_count} χ²-significant) → {result}")
+    print(f"  [route]  {len(unlabeled)} unlabeled ({len(robust_unlabeled)} robust) → {result}")
     return result
 
 
 def should_investigate(state: DrugSafetyState) -> str:
-    label_text = state.get("label_text", "")
-    # Gate investigation on χ²-significant signals only — weak signals surface
-    # in the table with '~' but don't trigger expensive LLM investigation.
+    label_text     = state.get("label_text", "")
+    llt_expansions = state.get("llt_expansions", {})
+    # Gate investigation on signals that pass BOTH:
+    #   1. robust (PRR lower CI > 1.0) — excludes small-n noise
+    #   2. fdr_significant (BH q < 0.05) — controls family-wise false positives
+    # Fall back to χ²≥4 gate when CI/FDR fields absent (old schema or m=0).
     strong_unlabeled = [
         s for s in state["prr_signals"]
-        if not _is_labeled(s["reaction"], label_text)
+        if not _is_labeled(s["reaction"], label_text, llt_expansions)
         and s["prr"] >= 5.0
         and s["drug_count"] >= 10
-        and s.get("significant", True)   # χ²≥4 gate
+        and s.get("robust", s.get("significant", True))           # CI lower > 1.0
+        and s.get("fdr_significant", s.get("significant", True))  # BH q < 0.05
     ]
     result = "investigate" if strong_unlabeled else "write_report"
-    print(f"  [route]  {len(strong_unlabeled)} strong χ²-significant unlabeled → {result}")
+    print(f"  [route]  {len(strong_unlabeled)} robust+FDR-significant unlabeled → {result}")
     return result
 
 

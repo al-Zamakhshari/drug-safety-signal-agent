@@ -23,9 +23,9 @@ Detects drug safety signals from FDA FAERS adverse event reports using a fully l
 
 | Stage | Method | Technology |
 |-------|--------|-----------|
-| Signal detection | PRR (Proportional Reporting Ratio) | OpenSearch aggregations |
-| Anomaly detection | class_ratio vs therapeutic class | OpenSearch faers_ml_rates |
-| Label cross-reference | Synonym-aware token-overlap | openFDA API |
+| Signal detection | PRR + 95% CI + BH-FDR | OpenSearch aggregations |
+| Within-class comparison | Pooled rate ratio + 95% CI vs therapeutic class | OpenSearch faers_ml_rates |
+| Label cross-reference | MedDRA LLT-expanded, negation-aware token-overlap | openFDA API |
 | Literature evidence | PubMed search | NCBI eUtils |
 | Investigation | Function calling — class effect / trend / DDI | Qwen3.5-9B |
 | Signal memory | Cross-run persistence | OpenSearch ML Memory (3.6+) |
@@ -34,13 +34,13 @@ Detects drug safety signals from FDA FAERS adverse event reports using a fully l
 **Example output — semaglutide, 82,699 reports, 11.9M baseline:**
 
 ```
-### PRR Signals (EMA standard: PRR ≥ 2.0, χ²≥4)
-| Reaction                           | PRR   | Sig | Reports | In FDA Label? | Literature |
-|------------------------------------|-------|-----|---------|---------------|------------|
-| IMPAIRED GASTRIC EMPTYING          | 82.72 | ✓   | 3,057   | Yes           | —          |
-| GLYCOSYLATED HAEMOGLOBIN INCREASED | 11.54 | ✓   | 1,111   | No ⚠️         | 0 papers   |
-| PANCREATITIS                       | 10.38 | ✓   | 1,504   | Yes           | 5 papers   |
-| BLOOD GLUCOSE DECREASED            | 9.97  | ✓   | 1,311   | No ⚠️         | 1 paper    |
+### PRR Signals (EMA standard: PRR ≥ 2.0, 95% CI lower > 1, BH q < 0.05)
+| Reaction                   | PRR   | 95% CI        | χ²/CI/FDR | Reports | Label? |
+|----------------------------|-------|---------------|-----------|---------|--------|
+| IMPAIRED GASTRIC EMPTYING  | 82.72 | 79.8–85.7     | ✓✓✓       | 3,057   | Yes    |
+| GLYCOSYLATED HB INCREASED  | 11.54 | 10.9–12.2     | ✓✓✓       | 1,111   | No ⚠️  |
+| PANCREATITIS               | 10.38 | 9.8–11.0      | ✓✓✓       | 1,504   | Yes    |
+| BLOOD GLUCOSE DECREASED    | 9.97  | 9.4–10.6      | ✓✓✓       | 1,311   | No ⚠️  |
 
 Risk: HIGH  |  Action: ESCALATE
 ```
@@ -95,7 +95,7 @@ uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 ./ingestion/download_faers_historical.sh
 uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 
-# 4. Compute class-ratio (one-time, enables anomaly detection)
+# 4. Compute within-class disproportionality (one-time)
 uv run python -m ingestion.compute_class_ratio
 
 # 5. Register OpenSearch MCP tools (one-time, enables free-form investigation)
@@ -120,14 +120,40 @@ PRR = (a / (a+b)) / (c / (c+d))
 
 a = drug reports with reaction        b = drug reports without reaction
 c = non-drug reports with reaction    d = non-drug reports without reaction
-
-Signal threshold: PRR ≥ 2.0  AND  Yates χ² ≥ 4  AND  n ≥ 3  (EMA standard)
 ```
 
-Key implementation details:
-- Baseline fetched **per-reaction** via OpenSearch `filters` agg — not truncated to a global top-N. Rare/novel signals are never silently dropped.
-- Annotated with Yates-corrected χ² (`significant: bool`) — weak signals still appear in the table with `~` badge for human review.
-- Same formula runs for every drug. No drug-specific code. Independently audited by Claude Opus for overfitting/rigging.
+Signal criteria applied in sequence:
+
+| Criterion | Threshold | What it controls |
+|-----------|-----------|-----------------|
+| Count | n ≥ 3 | Eliminates single-event noise |
+| PRR | ≥ 2.0 | Effect size (EMA standard) |
+| Yates χ² | ≥ 4.0 | Per-test significance (annotated `✓`/`~`) |
+| PRR lower 95% CI | > 1.0 | Small-n penalty — PRR=15 on n=4 has CI crossing 1.0 and is `~` |
+| BH-FDR q-value | < 0.05 | Family-wise correction across all m reactions tested |
+
+Only signals passing all five criteria enter the investigation gate. All criteria use published EMA thresholds — none are tuned on semaglutide.
+
+**Baseline:** fetched per-reaction via OpenSearch `filters` agg — not truncated to a global top-N. The drug's own top-N reactions are capped at 50 (a known limitation for tail signals).
+
+**CI formula:** log-normal approximation, SE = √(1/a − 1/(a+b) + 1/c − 1/(c+d)) (Evans 2001).
+
+---
+
+## Within-class Disproportionality
+
+The `faers_ml_rates` index stores a quarterly time series of per-drug, per-reaction reporting rates. For each drug × reaction × quarter, the **pooled comparator rate** is computed from all active comparator groups:
+
+```
+comp_rate = Σ comp_reaction_counts / Σ comp_quarter_totals   (pooled across groups)
+class_ratio = drug_rate / comp_rate
+```
+
+Counts are pooled across all quarters and a **95% rate-ratio CI** is computed using the same log-normal formula as the PRR CI. A signal passes only if `class_ratio_lower > 1.0` (lower CI bound excludes null), removing unstable small-n ratios.
+
+**Zero comparator cells** (reaction absent from all comparators) are handled by Haldane–Anscombe +0.5 continuity correction rather than a hard 999 sentinel — the ratio remains finite and its CI is appropriately wide.
+
+**This is within-class disproportionality screening, not anomaly detection.** No Random Cut Forest or RCF is used in the signal path. The GROWING / EMERGING / STABLE trend label is an advisory heuristic (recent vs early CI comparison) and is not a statistical gate.
 
 ---
 
@@ -136,25 +162,25 @@ Key implementation details:
 ```
 LangGraph StateGraph — 10 nodes
 │
-├── resolve_names        RxNorm API → all brand/generic names          Python
-├── load_memory          OpenSearch ML Memory → prior run findings      Python
-├── calculate_prr        OpenSearch filters agg → PRR + χ²             Python
-├── anomaly_detection    faers_ml_rates → class_ratio signals           Python
-├── fetch_label          openFDA + synonym expansion → label text       Python
+├── resolve_names        RxNorm API → all brand/generic names              Python
+├── load_memory          OpenSearch ML Memory → prior run findings          Python
+├── calculate_prr        OpenSearch filters agg → PRR + 95% CI + BH-FDR   Python
+├── anomaly_detection    faers_ml_rates → pooled rate ratio + CI            Python
+├── fetch_label          openFDA + MedDRA LLT expansion → label text        Python
 │
-├── [search_lit?]        PubMed API                                     Python
-│   (PRR≥3 AND χ²-significant AND unlabeled)
+├── [search_lit?]        PubMed API                                          Python
+│   (PRR≥3 AND robust CI AND unlabeled)
 │
-├── [investigate?]       Qwen3.5-9B — function calling, temp=0          LLM
-│   (PRR≥5 AND χ²-significant AND unlabeled)
+├── [investigate?]       Qwen3.5-9B — function calling, temp=0              LLM
+│   (PRR≥5 AND robust CI AND BH-FDR significant AND unlabeled)
 │   tools: get_prr, check_class_effect, get_signal_trend,
 │          compare_time_periods (DataDistributionTool),
 │          search_faers (flexible DSL queries)
 │
-├── write_report         Qwen3.5-9B — narrative prose only              LLM
-│   (PRR/anomaly tables emitted by Python — numbers never re-typed by model)
+├── write_report         Qwen3.5-9B — narrative prose only                  LLM
+│   (PRR/rate-ratio tables emitted by Python — numbers never re-typed by model)
 │
-└── save_memory          OpenSearch ML Memory → persist findings         Python
+└── save_memory          OpenSearch ML Memory → persist findings             Python
 ```
 
 **Design principle:** Python owns all statistics; LLM writes prose and investigates.
@@ -166,8 +192,7 @@ LangGraph StateGraph — 10 nodes
 | Feature | API | Purpose |
 |---------|-----|---------|
 | ML Memory | `/_plugins/_ml/memory` | Signal registry — persists findings across runs |
-| DataDistributionTool | `/_plugins/_ml/tools/_execute/DataDistributionTool` | Time-period divergence — finds EMERGING vs GROWING signals |
-| Anomaly Detection | `/_plugins/_anomaly_detection` | RCF on class_ratio time series |
+| DataDistributionTool | `/_plugins/_ml/tools/_execute/DataDistributionTool` | Time-period divergence — EMERGING vs GROWING signals |
 | KNN / Neural Search | `/_plugins/_knn` | Available for semantic reaction matching |
 | `filters` aggregation | standard | Per-reaction baseline (no top-N truncation) |
 
@@ -189,27 +214,28 @@ curl -u admin:Pharma@2024! -k https://localhost:9200/_plugins/_ml/memory
 
 FDA labels and MedDRA PTs use different vocabulary. The matcher handles:
 
-- **Synonym expansion**: `delays`↔`impaired`, `reduced`↔`decreased`, etc. so "delays gastric emptying" matches "IMPAIRED GASTRIC EMPTYING"
+- **MedDRA LLT expansion**: fetches official Lower-Level Term synonyms from openFDA (cached locally) — e.g. "MYOCARDIAL INFARCTION" → also tries "heart attack", so off-demo drugs don't produce systematic false-novel flags
+- **Synonym expansion**: `delays`↔`impaired`, `reduced`↔`decreased`, etc.
 - **Sentence-aware negation**: "no evidence of pancreatitis" → `False`; "no other findings. pancreatitis occurred." → `True`
 - **Direction-aware**: "BLOOD GLUCOSE DECREASED" not matched by a label that only says "blood glucose increased"
-- **Word-order independent**: "PANCREATITIS ACUTE" matches "acute pancreatitis"
+- **Three-state output**: `Yes` / `Possible` (partial match) / `No ⚠️` (no match)
 
-No MedDRA ontology required — pure string matching.
+**Limitation:** the synonym dictionary covers ~16 hand-curated pairs. Reactions outside these pairs rely entirely on MedDRA LLT expansion. The LLT cache is populated from openFDA on first run — subsequent runs are fully offline.
 
 ---
 
-## Scientific Validity (Independent Audit)
+## Known Limitations
 
-The system was audited by Claude Opus for overfitting and rigging. Key findings:
+This tool is a **PRR + within-class disproportionality screener**. It is comparable in statistical content to OpenVigil's PRR/ROR output. What it is not:
 
-| Concern | Verdict |
-|---------|---------|
-| PRR formula | ✅ Correct 2×2, no drug-specific code |
-| Thresholds | ✅ EMA published standards (PRR≥2, χ²≥4, n≥3) — not tuned on semaglutide |
-| Novel signal detection | ✅ Would detect rofecoxib MI signal with pre-2004 data |
-| Label matching | ✅ Fixed — synonym expansion prevents false-novel flags |
-| Class-ratio comparators | ✅ Defensible, conservative |
-| Baseline self-reference | ✅ Correctly subtracted (negligible bias) |
+| Limitation | Impact |
+|------------|--------|
+| **No Bayesian shrinkage** (BCPNN/EBGM) | PRR point estimates at low n are noisy; the 95% CI lower bound mitigates this but does not eliminate it |
+| **No stratification** (age / sex / reporter type) | Simpson's paradox confounding is unaddressed |
+| **No exposure normalisation** | PRR measures reporting rate, not incidence. Market exposure differences between drugs are not controlled. |
+| **FAERS structural biases** | Duplicate reports, Weber effect (reporting peaks ~2yr post-launch), notoriety/litigation bias (especially relevant for the rofecoxib retrospective), stimulated reporting, and co-medication confounding are inherent to spontaneous reporting and are not adjusted for. |
+| **Drug's top-N reactions capped at 50** | Reactions ranked >50 in the drug's own profile are not tested — a novel reaction ranked #51 would be missed |
+| **Comparator set is fixed** | Only 3 drugs with pre-configured comparators (semaglutide, rofecoxib, liraglutide). For other drugs, the within-class table will be empty. |
 
 ---
 
@@ -224,21 +250,24 @@ The system was audited by Claude Opus for overfitting and rigging. Key findings:
 ## Roadmap
 
 - [x] PRR — correct 2×2 table, per-reaction baseline, no rank truncation
+- [x] PRR 95% confidence interval (log-normal, Evans 2001)
+- [x] Benjamini–Hochberg FDR correction across all reactions tested
 - [x] Yates χ² significance annotation
-- [x] FDA label cross-reference — synonym-aware, negation-aware, sentence-scoped
+- [x] FDA label cross-reference — MedDRA LLT-expanded, negation-aware, sentence-scoped
+- [x] Three-state label match (Yes / Possible / No)
 - [x] PubMed literature evidence
-- [x] Class-ratio anomaly detection vs therapeutic class
-- [x] LLM investigation — function calling with 5 tools
+- [x] Within-class disproportionality — pooled rate ratio + 95% CI, Haldane–Anscombe correction
+- [x] LLM investigation — function calling with 5 tools, CI-grounded prompts
 - [x] Deterministic table rendering — numbers never re-typed by model
 - [x] Signal registry — OpenSearch ML Memory (cross-run persistence)
 - [x] DataDistributionTool — time-period emergence detection
 - [x] Polars ingestion — 3× less memory, handles AERS + FAERS formats
 - [x] Full FAERS 2004–2026 (historical + current)
 - [x] Web UI — FastAPI + SSE streaming, dark-mode
-- [x] Independent scientific audit (no overfitting confirmed)
-- [ ] Significance gating in routing (currently advisory only)
 - [ ] Stratified PRR (by age / sex / reporter type)
 - [ ] BCPNN / EBGM Bayesian shrinkage estimators
+- [ ] Configurable comparator groups (currently hardcoded for 3 drugs)
+- [ ] GitHub Actions CI
 
 ---
 
@@ -253,4 +282,6 @@ The system was audited by Claude Opus for overfitting and rigging. Key findings:
 
 For **research purposes only**. PRR signals are statistical associations, not causal evidence. No regulatory decisions should be made based solely on this tool's output. Requires clinical validation before any regulatory action.
 
-**LLM narrative caveat**: The "Key Findings", "Classification" labels (DRUG_SPECIFIC / CLASS_EFFECT), and "Clinical Insight" sentences in the briefing are generated by Qwen3.5-9B. They are advisory and non-deterministic — the same data may produce different narrative text across runs. All numeric values (PRR, χ², counts, class_ratio) are computed deterministically by Python and are reproducible.
+**Statistics:** All numeric values (PRR, 95% CI, χ², BH q-value, counts, class_ratio) are computed deterministically by Python and are fully reproducible. The PRR formula, CI, and thresholds follow published EMA/813938/2011 guidelines.
+
+**LLM narrative:** The "Key Findings", "Classification" labels (DRUG_SPECIFIC / CLASS_EFFECT), and "Clinical Insight" sentences are generated by Qwen3.5-9B. They are advisory and non-deterministic — the same data may produce different wording across runs.

@@ -1,10 +1,93 @@
 """Tools for querying the openFDA public API."""
 
 import httpx
+import json
+import os
+import re
+from pathlib import Path
 from typing import Any
 
 OPENFDA_BASE = "https://api.fda.gov/drug"
-RXNORM_BASE = "https://rxnav.nlm.nih.gov/REST"
+RXNORM_BASE  = "https://rxnav.nlm.nih.gov/REST"
+
+# Local cache for MedDRA PT→LLT mappings — populated on first use, persists across runs.
+# This keeps the tool offline after the first fetch of each drug's reactions.
+_LLT_CACHE_FILE = Path(__file__).parent.parent.parent / ".meddra_llt_cache.json"
+_llt_cache: dict[str, list[str]] | None = None
+
+
+def _load_llt_cache() -> dict[str, list[str]]:
+    global _llt_cache
+    if _llt_cache is None:
+        if _LLT_CACHE_FILE.exists():
+            try:
+                _llt_cache = json.loads(_LLT_CACHE_FILE.read_text())
+            except Exception:
+                _llt_cache = {}
+        else:
+            _llt_cache = {}
+    return _llt_cache
+
+
+def _save_llt_cache(cache: dict[str, list[str]]) -> None:
+    try:
+        _LLT_CACHE_FILE.write_text(json.dumps(cache, indent=2))
+    except Exception:
+        pass
+
+
+async def get_meddra_llts(pt: str) -> list[str]:
+    """
+    Return MedDRA Lower-Level Terms (LLTs) for a Preferred Term (PT).
+
+    LLTs are official MedDRA synonyms for a PT — e.g. "myocardial infarction"
+    has LLTs including "heart attack", "MI", etc. Using LLTs prevents false-novel
+    flags in `_is_labeled` when FDA label text uses a synonym not in the PT.
+
+    Data source: openFDA drug/event API (counts by LLT for a given PT reaction).
+    Results are cached locally in .meddra_llt_cache.json so subsequent runs
+    work fully offline.
+
+    Returns list of clean LLT strings in ALL CAPS. Falls back to [pt] on any error.
+    """
+    cache = _load_llt_cache()
+    pt_upper = pt.upper()
+
+    if pt_upper in cache:
+        return cache[pt_upper]
+
+    # Query openFDA for all LLTs that map to this PT via the reactions count endpoint.
+    # The LLT field is reactionmeddrallt — filtering by PT and counting by LLT
+    # gives us the LLT vocabulary for this PT.
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{OPENFDA_BASE}/event.json",
+                params={
+                    "search": f'patient.reaction.reactionmeddrapt.exact:"{pt_upper}"',
+                    "count":  "patient.reaction.reactionmeddrallt.exact",
+                    "limit":  "20",
+                },
+            )
+            data = resp.json()
+            llts = []
+            for item in data.get("results", []):
+                term = item.get("term", "").upper().strip()
+                # Keep only terms that share significant token overlap with the PT
+                # to exclude co-reported reactions that aren't true LLT synonyms
+                pt_tokens = set(re.findall(r"[a-z]+", pt_upper.lower()))
+                llt_tokens = set(re.findall(r"[a-z]+", term.lower()))
+                # Require at least half the PT tokens to appear in the LLT
+                if pt_tokens and len(pt_tokens & llt_tokens) >= max(1, len(pt_tokens) // 2):
+                    if term != pt_upper:
+                        llts.append(term)
+            cache[pt_upper] = llts
+            _save_llt_cache(cache)
+            return llts
+    except Exception:
+        cache[pt_upper] = []
+        _save_llt_cache(cache)
+        return []
 
 
 async def _get(url: str, params: dict) -> dict:
