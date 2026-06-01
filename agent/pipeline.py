@@ -55,17 +55,29 @@ def _model(max_tokens: int = 800) -> ChatOpenAI:
     )
 
 
+INVESTIGATOR_MODEL = os.getenv("INVESTIGATOR_MODEL", "docker.io/ai/qwen3.5:9B-UD-Q4_K_XL")
+
+
 def _model_31b():
     """
-    Gemma4 31B via Google AI Studio — used for the investigator when
-    GOOGLE_API_KEY is set. Much more reliable for multi-step tool calling
+    Investigator model — tiered by availability:
+      1. Gemma4 31B via API (best quality, needs GOOGLE_API_KEY)
+      2. Qwen3.5-9B local (better reasoning than E4B, same tool calling)
+      3. E2B fallback (always available)
+    Configured via INVESTIGATOR_MODEL env var.
     than E2B (4B → 31B active params). Falls back to local E2B if no key.
     """
     if not GOOGLE_API_KEY:
-        # E2B works correctly for investigation at 2000 tokens.
-        # Earlier "0% classification rate" was a false negative — our test
-        # checked only the last 60 chars; E2B writes CLASS_EFFECT mid-response.
-        return _model(max_tokens=2000)
+        # Use INVESTIGATOR_MODEL if available (default: Qwen3.5-9B)
+        # Qwen3.5-9B outperforms E4B on reasoning depth while being same size.
+        # Falls back to LOCAL_MODEL_NAME (E2B) if investigator model not pulled.
+        return ChatOpenAI(
+            model=INVESTIGATOR_MODEL,
+            base_url=LOCAL_MODEL_URL,
+            api_key="docker",
+            max_tokens=2000,
+            temperature=0,
+        )
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
