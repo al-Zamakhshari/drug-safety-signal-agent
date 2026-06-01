@@ -542,8 +542,14 @@ async def _calculate_stratified_prr(
 
 
 async def get_drug_names(drug_name: str) -> dict[str, Any]:
-    """Resolve a drug name to all FAERS variants using RxNorm + fallback dict."""
+    """
+    Resolve a drug name to all FAERS variants using RxNorm BN tty.
+    Falls back to config/brand_aliases.yaml for withdrawn drugs that
+    have no BN entries in RxNorm.
+    """
     import httpx
+    import yaml
+    from pathlib import Path
 
     RXNORM = "https://rxnav.nlm.nih.gov/REST"
     all_names: set[str] = {drug_name.upper()}
@@ -564,11 +570,16 @@ async def get_drug_names(drug_name: str) -> dict[str, Any]:
     except Exception:
         pass
 
-    FALLBACKS = {
-        "ROFECOXIB": ["VIOXX"], "CERIVASTATIN": ["BAYCOL"],
-        "CISAPRIDE": ["PROPULSID"], "TERFENADINE": ["SELDANE"],
-    }
-    all_names.update(FALLBACKS.get(drug_name.upper(), []))
+    # Brand fallbacks from config/brand_aliases.yaml (withdrawn/niche drugs)
+    try:
+        _aliases_file = Path(__file__).parent.parent.parent / "config" / "brand_aliases.yaml"
+        if _aliases_file.exists():
+            _aliases = yaml.safe_load(_aliases_file.read_text()) or {}
+            fallback = _aliases.get(drug_name.upper(), {}).get("brands", [])
+            all_names.update(fallback)
+    except Exception:
+        pass
+
     return {"query": drug_name, "found_names": sorted(all_names)}
 
 

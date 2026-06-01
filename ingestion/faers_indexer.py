@@ -2,8 +2,7 @@
 Index FAERS adverse event reports into OpenSearch.
 
 Usage:
-    uv run python -m ingestion.faers_indexer --drug semaglutide --limit 6000
-    uv run python -m ingestion.faers_indexer --drug rofecoxib --limit 2000
+    uv run python -m ingestion.faers_indexer --drug <drug-name> --limit 5000
 """
 
 import asyncio
@@ -131,7 +130,7 @@ async def index_drug(drug_name: str, limit: int = 1000):
 
 def main():
     parser = argparse.ArgumentParser(description="Index FAERS data into OpenSearch")
-    parser.add_argument("--drug",  required=True, help="Drug name (e.g. semaglutide)")
+    parser.add_argument("--drug",  required=True, help="Drug name (generic or brand, any case)")
     parser.add_argument("--limit", type=int, default=1000, help="Max reports to fetch")
     args = parser.parse_args()
     asyncio.run(index_drug(args.drug, args.limit))

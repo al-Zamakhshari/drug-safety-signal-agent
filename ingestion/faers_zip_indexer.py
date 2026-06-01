@@ -12,7 +12,7 @@ Memory profile per ZIP:
 
 Usage:
     uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
-    uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --drugs semaglutide,rofecoxib
+    uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 """
 
 import asyncio, argparse, os, zipfile, glob, time
@@ -30,8 +30,11 @@ def _load_default_drugs() -> set[str]:
     """
     Derive the default drug filter set from config/comparators.yaml.
     Includes the index drugs AND all their comparators so the full
-    within-class comparison is supported without re-filtering.
-    Falls back to a minimal hardcoded set if the config is absent.
+    within-class comparison is supported in a single ZIP pass.
+
+    If comparators.yaml is empty or absent, returns an empty set —
+    which means --all-drugs indexes every drug encountered in the ZIPs
+    (no filtering). Add drugs to comparators.yaml to restrict indexing.
     """
     from pathlib import Path
     import yaml as _yaml
@@ -41,19 +44,14 @@ def _load_default_drugs() -> set[str]:
             cfg = _yaml.safe_load(cfg_path.read_text()) or {}
             drugs: set[str] = set()
             for entry in cfg.values():
-                drugs.update(n.upper() for n in entry.get("names", []))
-                for grp in entry.get("comparators", []):
-                    drugs.update(n.upper() for n in grp)
-            if drugs:
-                return drugs
+                if isinstance(entry, dict):
+                    drugs.update(n.upper() for n in entry.get("names", []))
+                    for grp in entry.get("comparators", []):
+                        drugs.update(n.upper() for n in grp)
+            return drugs   # empty set = index everything (no filter)
         except Exception:
             pass
-    # Fallback: keep a minimal set so --all-drugs works even without the YAML
-    return {
-        "SEMAGLUTIDE", "OZEMPIC", "WEGOVY", "RYBELSUS",
-        "ROFECOXIB", "VIOXX", "CELECOXIB", "IBUPROFEN", "NAPROXEN",
-        "LIRAGLUTIDE", "VICTOZA", "SAXENDA",
-    }
+    return set()  # no config — index everything
 
 
 DEFAULT_DRUGS = _load_default_drugs()

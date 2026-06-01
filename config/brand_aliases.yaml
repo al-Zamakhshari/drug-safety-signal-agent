@@ -1,0 +1,44 @@
+# Brand-name aliases for drugs whose brand names are absent or incomplete
+# in RxNorm (typically withdrawn drugs or drugs with complex brand histories).
+#
+# These are used when:
+#   1. normalize_drug_name() queries RxNorm BN tty but gets no results
+#   2. get_drug_label() tries the generic name but openFDA label lookup fails
+#
+# Format:
+#   GENERIC_NAME_UPPER:
+#     brands: [BRAND1, BRAND2]   # FAERS drug_names[] spelling (ALL CAPS)
+#     label_names: [name1, name2] # openFDA label search spellings (lowercase)
+#
+# How to add a drug:
+#   1. Check RxNorm: https://rxnav.nlm.nih.gov/REST/rxcui.json?name=<drug>&search=1
+#   2. If BN tty returns no results, add the brand names here
+#   3. No re-ingestion needed — used at query time only
+#
+# Note: RxNorm covers most marketed drugs well. Only add entries here when
+# RxNorm BN lookup demonstrably fails (e.g. for withdrawn drugs).
+
+# Withdrawn drugs — RxNorm has no BN tty entries for these
+ROFECOXIB:
+  brands: [VIOXX]
+  label_names: [vioxx]
+
+CERIVASTATIN:
+  brands: [BAYCOL]
+  label_names: [baycol]
+
+CISAPRIDE:
+  brands: [PROPULSID]
+  label_names: [propulsid]
+
+TERFENADINE:
+  brands: [SELDANE]
+  label_names: [seldane]
+
+VALDECOXIB:
+  brands: [BEXTRA]
+  label_names: [bextra]
+
+BROMFENAC:
+  brands: [DURACT]
+  label_names: [duract]

@@ -4,8 +4,23 @@ import httpx
 import json
 import os
 import re
+import yaml
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+_BRAND_ALIASES_FILE = Path(__file__).parent.parent.parent / "config" / "brand_aliases.yaml"
+
+
+@lru_cache(maxsize=1)
+def _load_brand_aliases() -> dict:
+    """Load brand aliases from config/brand_aliases.yaml (cached at first call)."""
+    if _BRAND_ALIASES_FILE.exists():
+        try:
+            return yaml.safe_load(_BRAND_ALIASES_FILE.read_text()) or {}
+        except Exception:
+            pass
+    return {}
 
 OPENFDA_BASE = "https://api.fda.gov/drug"
 RXNORM_BASE  = "https://rxnav.nlm.nih.gov/REST"
@@ -100,14 +115,14 @@ async def _get(url: str, params: dict) -> dict:
 async def normalize_drug_name(drug_name: str) -> dict[str, Any]:
     """
     Resolve a drug name to its RxNorm CUI and return clean brand-name tokens
-    suitable for FAERS drug_names field matching (ALL CAPS, e.g. OZEMPIC).
+    suitable for FAERS drug_names field matching (ALL CAPS).
 
     Uses RxNorm related.json?tty=BN (Brand Names) — returns short trademarked
     names, not verbose product descriptions. The old drugs.json endpoint returns
     strings like "0.25 MG Pen Injector [Ozempic]" which do not match FAERS.
 
     Args:
-        drug_name: Generic or brand name (e.g. "semaglutide" or "Ozempic")
+        drug_name: Generic or brand name
 
     Returns:
         dict with:
@@ -148,14 +163,8 @@ async def normalize_drug_name(drug_name: str) -> dict[str, Any]:
 
         # Step 2: get brand names (tty=BN returns short trademarked brand tokens).
         # These match FAERS drug_names field exactly (ALL CAPS, no dose information).
-        # Note: withdrawn drugs (e.g. rofecoxib/Vioxx) may have no BN in RxNorm.
-        # FAERS_BRAND_FALLBACK provides manual overrides for these cases.
-        FAERS_BRAND_FALLBACK: dict[str, list[str]] = {
-            "ROFECOXIB":  ["VIOXX"],
-            "CERIVASTATIN": ["BAYCOL"],
-            "CISAPRIDE":  ["PROPULSID"],
-            "TERFENADINE": ["SELDANE"],
-        }
+        # Withdrawn drugs may have no BN in RxNorm — config/brand_aliases.yaml
+        # provides overrides that users can extend.
         related = await _get(f"{RXNORM_BASE}/rxcui/{rxcui}/related.json",
                              {"tty": "BN"})
         brand_names: list[str] = []
@@ -166,8 +175,9 @@ async def normalize_drug_name(drug_name: str) -> dict[str, Any]:
                 if name and name != generic and not any(c.isdigit() for c in name):
                     brand_names.append(name)
 
-        # Add manual fallbacks for withdrawn drugs not in RxNorm BN
-        fallback = FAERS_BRAND_FALLBACK.get(generic.upper(), [])
+        # Load brand fallbacks from config/brand_aliases.yaml for withdrawn/niche drugs
+        aliases = _load_brand_aliases()
+        fallback = aliases.get(generic.upper(), {}).get("brands", [])
         brand_names.extend(fallback)
 
         # Deduplicate, preserve order
@@ -303,23 +313,19 @@ async def get_signal_timeline(drug_name: str, reaction_term: str) -> dict[str, A
 async def get_drug_label(drug_name: str) -> dict[str, Any]:
     """
     Fetch the current FDA drug label for a drug.
-    Tries brand name, generic name, and common aliases automatically.
+    Tries the generic name, then brand names from config/brand_aliases.yaml
+    (for withdrawn drugs not indexed in openFDA by generic name).
 
     Args:
-        drug_name: Brand or generic drug name (e.g. "semaglutide" or "ozempic")
+        drug_name: Generic or brand name
 
     Returns:
         dict with warnings, adverse_reactions, contraindications, boxed_warning
     """
-    # Known brand-name aliases for generics that don't resolve directly
-    ALIASES = {
-        "semaglutide": ["ozempic", "wegovy", "rybelsus"],
-        "rofecoxib":   ["vioxx"],
-        "celecoxib":   ["celebrex"],
-        "liraglutide": ["victoza", "saxenda"],
-        "tirzepatide": ["mounjaro", "zepbound"],
-    }
-    names_to_try = [drug_name] + ALIASES.get(drug_name.lower(), [])
+    # Build the list of names to try from config/brand_aliases.yaml
+    aliases = _load_brand_aliases()
+    label_names = aliases.get(drug_name.upper(), {}).get("label_names", [])
+    names_to_try = [drug_name] + label_names
 
     for name in names_to_try:
         try:

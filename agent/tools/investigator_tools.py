@@ -89,8 +89,8 @@ async def _get_prr(drug_names: list[str], reaction: str) -> dict:
 
 @tool
 async def get_prr(
-    drug: Annotated[str, "Drug name in ALL CAPS (e.g. SEMAGLUTIDE, OZEMPIC)"],
-    reaction: Annotated[str, "MedDRA reaction term in ALL CAPS (e.g. ASTHMA, PANCREATITIS)"],
+    drug: Annotated[str, "Drug name in ALL CAPS as stored in FAERS drug_names field"],
+    reaction: Annotated[str, "MedDRA Preferred Term in ALL CAPS"],
 ) -> str:
     """
     Calculate Proportional Reporting Ratio (PRR) for a specific drug-reaction

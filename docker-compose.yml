@@ -1,7 +1,7 @@
 # Drug Safety Signal Agent — fully local stack
 # Requirements: Docker Desktop with Model Runner enabled
 # Usage: docker compose up -d
-# Then: uv run python main.py semaglutide
+# Then: uv run python main.py <drug-name>
 
 models:
   # Qwen3.5-9B: used for BOTH investigation (thinking on) and report writing (thinking off)
