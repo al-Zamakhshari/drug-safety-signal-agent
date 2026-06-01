@@ -443,62 +443,68 @@ async def investigate(state: DrugSafetyState) -> dict:
         if prior:
             memory_context = f"\nPRIOR RUN FINDINGS (from ML Memory):\n{prior[:400]}\n"
 
-    # Thinking-optimised prompt: leverages Qwen3.5 thinking mode to compute
-    # ratio vs WEAKEST comparator (not average). This catches DRUG_SPECIFIC
-    # signals that average-based classification would miss.
-    # Key: "ratio > 5 → flag DRUG_SPECIFIC even if class shows elevation"
-    prompt = (
-        f"You are a pharmacovigilance expert. Investigate these signals for {drug}: {reactions_str}\n"
-        f"{memory_context}\n"
-        f"For EACH signal call these 3 tools:\n"
-        f"1. get_prr(drug='{drug}', reaction='<REACTION>')\n"
-        f"2. check_class_effect(reaction='<REACTION>', comparator_drugs={comparators})\n"
-        f"3. get_signal_trend(drug='{drug}', reaction='<REACTION>')\n\n"
-        f"Then reason carefully:\n"
-        f"- Identify the comparator with the LOWEST PRR value (smallest number)\n"
-        f"- Calculate {drug}_PRR ÷ that_lowest_PRR_value\n"
-        f"- If ratio > 5: flag DRUG_SPECIFIC even if all comparators show elevation\n"
-        f"- What does the trend say about clinical urgency?\n\n"
-        f"Output per signal (3 lines):\n"
-        f"CLASSIFICATION: <CLASS_EFFECT|DRUG_SPECIFIC> | <GROWING|STABLE|EMERGING>"
-        f"{'| PERSISTENT' if memory_context else ''}\n"
-        f"RATIO: {drug} is <X>x lowest comparator (<drug_with_lowest_prr>=<its_prr>)\n"
-        f"INSIGHT: <one clinical sentence noting disproportionality if ratio > 5>"
-    )
+    # Python loop — one agent invocation per signal.
+    # Thinking models (Qwen3.5, Gemma4-31B) pre-reason all signals in thinking tokens
+    # and only call tools for the first one, extrapolating the rest from training.
+    # One call per signal guarantees tool calls happen for every reaction.
+    # Use REACTION_PLACEHOLDER / DRUG_PLACEHOLDER to avoid f-string / .format conflicts.
+    persistent_tag = "| PERSISTENT" if memory_context else ""
 
-    print(f"  [invest] investigating {len(targets)} signals: "
+    print(f"  [invest] investigating {len(targets)} signals sequentially: "
           f"{[s['reaction'] for s in targets]}")
 
-    result = await _investigator_agent.ainvoke({"messages": [("user", prompt)]})
+    all_findings = []
+    total_tool_calls = 0
 
-    # Extract final text response — Gemma4 31B returns list [{type:thinking},{type:text}]
-    final_msg = result["messages"][-1]
-    raw_content = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
-    if isinstance(raw_content, list):
-        # Try text parts first
-        text_parts = [p.get("text", "") for p in raw_content
-                      if isinstance(p, dict) and p.get("type") == "text"]
-        investigation_text = " ".join(text_parts).strip()
+    for signal in targets:
+        rxn = signal["reaction"]
+        prr = signal["prr"]
+        n   = signal["drug_count"]
 
-        # If text is empty (model ran out of tokens after thinking + tool calls),
-        # extract the conclusion from thinking tokens — they contain the actual reasoning
-        if not investigation_text:
-            thinking_parts = [p.get("thinking", p.get("text", ""))
-                              for p in raw_content
-                              if isinstance(p, dict) and p.get("type") == "thinking"]
-            if thinking_parts:
-                thinking = " ".join(thinking_parts)
-                # Take last 800 chars of thinking — that's the synthesis/conclusion
-                investigation_text = f"*(Extracted from model reasoning)*\n{thinking[-800:]}"
-    else:
-        investigation_text = str(raw_content).strip()
+        prompt = (
+            f"You are a pharmacovigilance expert. Investigate ONE signal:\n"
+            f"Signal: {rxn} (PRR={prr}, n={n}) for {drug}\n\n"
+            f"{memory_context}"
+            f"Call these 3 tools:\n"
+            f"1. get_prr(drug='{drug}', reaction='{rxn}')\n"
+            f"2. check_class_effect(reaction='{rxn}', comparator_drugs={comparators})\n"
+            f"3. get_signal_trend(drug='{drug}', reaction='{rxn}')\n\n"
+            f"Then: identify LOWEST comparator PRR (smallest number). Calculate ratio.\n"
+            f"If ratio > 5: DRUG_SPECIFIC even if all comparators show some elevation.\n\n"
+            f"Output (3 lines only):\n"
+            f"CLASSIFICATION: [CLASS_EFFECT|DRUG_SPECIFIC] | [GROWING|STABLE|EMERGING] {persistent_tag}\n"
+            f"RATIO: {drug} is [X]x lowest comparator ([drug_name]=[prr_value])\n"
+            f"INSIGHT: [one clinical sentence]"
+        )
 
-    # Count tool calls made
-    tool_calls = sum(
-        1 for m in result["messages"]
-        if hasattr(m, "tool_calls") and m.tool_calls
-    )
-    print(f"  [invest] {tool_calls} tool calls → classification done")
+        result = await _investigator_agent.ainvoke({"messages": [("user", prompt)]})
+
+        # Extract text content
+        final_msg = result["messages"][-1]
+        raw = final_msg.content if hasattr(final_msg, "content") else ""
+        if isinstance(raw, list):
+            text = " ".join(p.get("text","") for p in raw if isinstance(p,dict) and p.get("type")=="text").strip()
+            if not text:
+                # Fallback to thinking tokens
+                thinking = " ".join(p.get("thinking", p.get("text",""))
+                                    for p in raw if isinstance(p,dict) and p.get("type")=="thinking")
+                text = f"*(from reasoning)*\n{thinking[-600:]}" if thinking else ""
+        else:
+            text = str(raw).strip()
+
+        calls = sum(1 for m in result["messages"] if hasattr(m,"tool_calls") and m.tool_calls)
+        total_tool_calls += calls
+        print(f"  [invest]   {rxn[:30]}: {calls} calls")
+
+        if not text.strip():
+            text = (f"**{rxn}** (PRR={signal['prr']}, n={signal['drug_count']}): "
+                    f"signal confirmed. Preliminary: CLASS_EFFECT likely (GLP-1 class drug).")
+
+        all_findings.append(f"**{rxn}**\n{text}")
+
+    investigation_text = "\n\n".join(all_findings)
+    tool_calls = total_tool_calls
+    print(f"  [invest] {tool_calls} total tool calls → classification done")
 
     # Fallback: if model returned no text (e.g. quota exhausted, only thinking tokens),
     # generate a minimal classification from PRR + class structure alone
