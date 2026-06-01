@@ -271,6 +271,45 @@ This tool is a **PRR + within-class disproportionality screener**. It is compara
 
 ---
 
+## Validation Against OpenVigil 2
+
+[OpenVigil 2](https://openvigil.pharmacology.uni-kiel.de/openvigil2/) (Böhm et al. 2012, 2016) uses the same FAERS source and the same PRR/ROR 2×2 formulas — making it the natural reference implementation.
+
+### How to run the benchmark
+
+```bash
+# Step 1 — export our output for a drug
+uv run python scripts/benchmark_vs_openvigil.py export semaglutide
+
+# Step 2 — get OpenVigil 2 data
+# Go to https://openvigil.pharmacology.uni-kiel.de/openvigil2/
+# Search "SEMAGLUTIDE", match FAERS vintage shown in our CSV, download CSV
+
+# Step 3 — compare
+uv run python scripts/benchmark_vs_openvigil.py compare \
+    scripts/benchmark_semaglutide_ours.csv \
+    scripts/benchmark_semaglutide_openvigil.csv
+```
+
+### What the comparison validates
+
+| If delta is… | Conclusion |
+|---|---|
+| < 5% on n ≥ 100 signals | ✅ Formula correct, same FAERS vintage |
+| 5–20% | ~ Expected from de-duplication / date-window differences |
+| > 20% on large signals | ⚠️ Investigate formula or baseline difference |
+
+### Known sources of legitimate difference
+
+- **FAERS vintage**: OpenVigil uses a specific quarterly snapshot; our data may span a different range
+- **De-duplication**: OpenVigil applies their own de-duplication; we use FDA raw data
+- **Top-N cap**: We test the drug's top 50 reactions; OpenVigil tests all — reactions ranked > 50 will appear only in OpenVigil
+- **Multi-drug reports**: Both count reports (not patients), but handling of reports listing many drugs may vary slightly
+
+PRR and ROR are both exported, matching the two estimators OpenVigil 2 reports.
+
+---
+
 ## Related
 
 **Hackathon version** (Elasticsearch + Elastic ML + Kibana MCP + Gemini API):  

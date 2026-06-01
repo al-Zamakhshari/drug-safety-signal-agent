@@ -7,8 +7,17 @@ Formula: PRR = (a / (a+b)) / (c / (c+d))
          a = drug reports with reaction        b = drug reports without reaction
          c = non-drug reports with reaction    d = non-drug reports without reaction
 
+Two estimators are computed for every signal:
+
+  PRR = (a/(a+b)) / (c/(c+d))   — Proportional Reporting Ratio (EMA standard)
+  ROR = (a·d) / (b·c)           — Reporting Odds Ratio (WHO/Uppsala standard)
+
+Both use the same 2×2 table. ROR is asymptotically equivalent to PRR when the
+reaction is rare, but diverges at high prevalence — reporting both lets comparison
+against external tools (e.g. OpenVigil 2 reports both PRR and ROR).
+
 Signal criteria (EMA/813938/2011):
-  - PRR ≥ 2.0
+  - PRR ≥ 2.0  AND  ROR ≥ 2.0
   - n (drug reports with reaction) ≥ 3
   - Yates χ² ≥ 4.0  (per-test, annotated as `significant`)
   - PRR lower 95% CI > 1.0  (annotated as `robust` — small-n penalised)
@@ -23,6 +32,8 @@ References:
   Evans et al. (2001) Use of proportional reporting ratios (PRRs) for signal
   generation from spontaneous adverse drug reaction reports — Pharmacoepidemiology
   and Drug Safety 10:483-486
+  Rothman et al. (2004) The reporting odds ratio and its advantages over the
+  proportional reporting ratio — Pharmacoepidemiology and Drug Safety 13:519-523
 """
 
 import math
@@ -59,6 +70,37 @@ def _yates_chi2(a: int, b: int, c: int, d: int) -> float:
         return 0.0
     numer = n * (abs(a * d - b * c) - n / 2.0) ** 2
     return numer / denom
+
+
+def _ror_ci(a: int, b: int, c: int, d: int) -> tuple[float, float, float]:
+    """
+    Reporting Odds Ratio and its 95% CI using log-normal approximation.
+
+        ROR = (a·d) / (b·c)
+        SE  = sqrt(1/a + 1/b + 1/c + 1/d)
+        CI  = exp(ln(ROR) ± 1.96·SE)
+
+    ROR is the WHO/Uppsala Monitoring Centre standard alongside PRR.
+    It equals the odds that a reaction is reported for the drug vs not,
+    relative to the same odds for all other drugs.
+
+    Uses Haldane–Anscombe +0.5 for zero cells.
+    Returns (ror, lower, upper).
+    """
+    a_adj = max(a, 0.5)
+    b_adj = max(b, 0.5)
+    c_adj = max(c, 0.5)
+    d_adj = max(d, 0.5)
+
+    ror = (a_adj * d_adj) / (b_adj * c_adj)
+    try:
+        se    = math.sqrt(1/a_adj + 1/b_adj + 1/c_adj + 1/d_adj)
+        lower = math.exp(math.log(ror) - 1.96 * se)
+        upper = math.exp(math.log(ror) + 1.96 * se)
+    except (ValueError, ZeroDivisionError):
+        lower, upper = 0.0, float("inf")
+
+    return round(ror, 2), round(lower, 2), round(upper, 2)
 
 
 def _prr_ci(a: int, b: int, c: int, d: int) -> tuple[float, float]:
@@ -182,19 +224,23 @@ async def calculate_prr(
             a, b = drug_count, drug_total - drug_count
             c, d = non_drug_count, non_drug_total - non_drug_count
 
-            chi2        = _yates_chi2(a, b, c, d)
-            lower, upper = _prr_ci(a, b, c, d)
+            chi2             = _yates_chi2(a, b, c, d)
+            prr_lower, prr_upper = _prr_ci(a, b, c, d)
+            ror, ror_lower, ror_upper = _ror_ci(a, b, c, d)
 
             tested.append({
                 "reaction":    reaction,
                 "prr":         round(prr, 2),
-                "prr_lower":   lower,
-                "prr_upper":   upper,
+                "prr_lower":   prr_lower,
+                "prr_upper":   prr_upper,
+                "ror":         ror,
+                "ror_lower":   ror_lower,
+                "ror_upper":   ror_upper,
                 "drug_count":  drug_count,
                 "baseline":    baseline,
                 "chi2":        round(chi2, 2),
-                "significant": chi2 >= 4.0,      # EMA per-test gate
-                "robust":      lower >= 1.0,      # lower CI > null (small-n penalised)
+                "significant": chi2 >= 4.0,         # EMA per-test gate
+                "robust":      prr_lower >= 1.0,    # lower CI > null (small-n penalised)
                 "_a": a, "_b": b, "_c": c, "_d": d,  # scratch — removed before return
             })
 

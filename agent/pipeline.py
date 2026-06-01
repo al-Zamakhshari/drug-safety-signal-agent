@@ -746,18 +746,22 @@ async def write_report(state: DrugSafetyState) -> dict:
         chi2_badge = "✓" if s.get("significant") else "~"
         robust_col = "✓" if s.get("robust") else "~"
         fdr_col    = "✓" if s.get("fdr_significant") else "~"
-        ci_col     = (f"{s.get('prr_lower','?')}–{s.get('prr_upper','?')}"
+        prr_ci_col = (f"{s.get('prr_lower','?')}–{s.get('prr_upper','?')}"
                       if s.get("prr_lower") is not None else "—")
+        ror_col    = str(s.get("ror", "—"))
+        ror_ci_col = (f"{s.get('ror_lower','?')}–{s.get('ror_upper','?')}"
+                      if s.get("ror_lower") is not None else "—")
         q_col      = str(s.get("q_value", "—"))
         inv_col    = inv_tags.get(rxn, "—")
         prr_rows.append(
-            f"| {rxn} | {s['prr']} | {ci_col} | {chi2_badge}{robust_col}{fdr_col} | "
+            f"| {rxn} | {s['prr']} ({prr_ci_col}) | {ror_col} ({ror_ci_col}) | "
+            f"{chi2_badge}{robust_col}{fdr_col} | "
             f"{s['drug_count']} | {is_labeled} | {papers} | {inv_col} |"
         )
     prr_block = (
-        "### PRR Signals (EMA standard: PRR ≥ 2.0, χ²≥4, 95% CI lower > 1, BH q < 0.05)\n"
-        "| Reaction | PRR | 95% CI | χ²/CI/FDR | Reports | In FDA Label? | Lit | Investigation |\n"
-        "|----------|-----|--------|-----------|---------|---------------|-----|---------------|\n"
+        "### PRR + ROR Signals (EMA standard: PRR/ROR ≥ 2.0, χ²≥4, 95% CI lower > 1, BH q < 0.05)\n"
+        "| Reaction | PRR (95% CI) | ROR (95% CI) | χ²/CI/FDR | Reports | In FDA Label? | Lit | Investigation |\n"
+        "|----------|-------------|-------------|-----------|---------|---------------|-----|---------------|\n"
         + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — | — | — |")
     )
 
