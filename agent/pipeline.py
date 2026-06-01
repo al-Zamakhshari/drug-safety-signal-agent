@@ -21,7 +21,7 @@ from typing import TypedDict, Optional
 from dotenv import load_dotenv
 
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent as create_react_agent   # LangGraph V2 migration
 from langchain_openai import ChatOpenAI
 
 from agent.tools.prr import calculate_prr, get_drug_names

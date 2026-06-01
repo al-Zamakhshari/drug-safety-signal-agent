@@ -8,6 +8,7 @@ dependencies = [
     "langgraph>=1.2.2",
     "langchain-core>=1.4.0",
     "langchain-openai>=1.2.2",
+    "langchain>=0.3",           # provides langchain.agents.create_agent (LangGraph V2 migration path)
     "langchain-google-genai>=4.2.4",
     # OpenSearch client (Apache 2.0)
     "opensearch-py[async]>=2.7.0",
