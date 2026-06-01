@@ -273,10 +273,10 @@ _OS_AUTH = (os.getenv("OPENSEARCH_USER", "admin"),
 async def compare_time_periods(
     drug: Annotated[str, "Drug name in ALL CAPS"],
     reaction: Annotated[str, "MedDRA reaction term in ALL CAPS"],
-    recent_start: Annotated[str, "ISO date for recent period start, e.g. 2023-01-01T00:00:00.000Z"],
-    recent_end:   Annotated[str, "ISO date for recent period end, e.g. 2026-01-01T00:00:00.000Z"],
-    baseline_start: Annotated[str, "ISO date for baseline period start, e.g. 2018-01-01T00:00:00.000Z"],
-    baseline_end:   Annotated[str, "ISO date for baseline period end, e.g. 2022-01-01T00:00:00.000Z"],
+    recent_start: Annotated[str, "ISO date for recent period start — use the drug's most recent reporting years, e.g. last 2 years of available data"],
+    recent_end:   Annotated[str, "ISO date for recent period end — typically the latest date in the dataset"],
+    baseline_start: Annotated[str, "ISO date for baseline period start — use the drug's earliest reporting years"],
+    baseline_end:   Annotated[str, "ISO date for baseline period end — typically 2+ years before the recent period start"],
 ) -> str:
     """
     Use OpenSearch DataDistributionTool (ML Commons 3.3+) to compare how

@@ -244,9 +244,23 @@ async def get_anomaly_signals(
             if mh_lower <= min_ratio_lower:
                 continue
 
-            # Trend: compare recent (2023+) vs early (2020–2021) MH sub-estimates
-            recent_strata = [s for s in strata if s["quarter"] >= "2023-01-01"]
-            early_strata  = [s for s in strata if "2020-01-01" <= s["quarter"] < "2022-01-01"]
+            # Trend: compare last-third vs first-third of the drug's observed quarter range.
+            # Data-relative windows so rofecoxib (2001-2004) and semaglutide (2018-2026)
+            # both get meaningful GROWING/EMERGING/STABLE labels.
+            # Fixed 2020/2023 cutoffs silently returned STABLE for any pre-2020 drug.
+            quarters_sorted = sorted(s["quarter"] for s in strata)
+            n_q = len(quarters_sorted)
+            if n_q >= 3:
+                early_cutoff  = quarters_sorted[n_q // 3]      # end of first third
+                recent_cutoff = quarters_sorted[2 * n_q // 3]  # start of last third
+                early_strata  = [s for s in strata if s["quarter"] <  early_cutoff]
+                recent_strata = [s for s in strata if s["quarter"] >= recent_cutoff]
+            elif n_q == 2:
+                early_strata  = [strata[0]]
+                recent_strata = [strata[1]]
+            else:
+                early_strata  = []
+                recent_strata = strata
 
             r_rr, r_lo, _ = _mh_rate_ratio(recent_strata) if recent_strata else (0, 0, 0)
             e_rr, e_lo, _ = _mh_rate_ratio(early_strata)  if early_strata  else (0, 0, 0)
