@@ -1,33 +1,46 @@
-# Comparator groups for within-class disproportionality (Mantel-Haenszel)
-#
-# Each entry defines one index drug and its therapeutic comparators.
-# The within-class Mantel-Haenszel rate ratio is computed as:
-#   drug_rate / pooled_comparator_rate  per quarter
-#
-# To add a drug:
-#   Option 1 — auto-discover via RxClass ATC (recommended):
-#     uv run python -m ingestion.discover_comparators --drug <name>
-#     # Reviews output, then rebuild the index:
-#     uv run python -m ingestion.compute_class_ratio --drug <NAME>
-#
-#   Option 2 — add manually following the format below:
-#     uv run python -m ingestion.compute_class_ratio --drug <NAME>
-#
-# Field guide:
-#   names:        FAERS drug_names[] values (ALL CAPS, generic + brand names).
-#                 Use RxNorm brand names exactly as they appear in your FAERS index.
-#   comparators:  List of comparator drug name groups. Each group is a list of
-#                 name variants (generic + brands) for one comparator drug.
-#                 Each group contributes one data point to the pooled class rate.
-#
-# Format example (do not use as-is — populate with your actual drugs):
-#
-# DRUG_GENERIC_NAME:
-#   names:
-#     - DRUG_GENERIC_NAME
-#     - BRAND_NAME_1
-#   comparators:
-#     - [COMPARATOR_A_GENERIC, COMPARATOR_A_BRAND]
-#     - [COMPARATOR_B_GENERIC]
-#
-# This file is intentionally empty — run discover_comparators to populate it.
+SEMAGLUTIDE:
+  names:
+  - SEMAGLUTIDE
+  - OZEMPIC
+  - RYBELSUS
+  - WEGOVY
+  comparators:
+  - - DULAGLUTIDE
+    - TRULICITY
+  - - LIRAGLUTIDE
+    - SAXENDA
+    - XULTOPHY
+    - VICTOZA
+  - - EXENATIDE
+    - BYDUREON
+    - BYETTA
+ROFECOXIB:
+  names:
+  - ROFECOXIB
+  comparators:
+  - - CELECOXIB
+    - CONSENSI
+    - CELEBREX
+    - ELYXYB
+  - - VALDECOXIB
+  - - ETORICOXIB
+LIRAGLUTIDE:
+  names:
+  - LIRAGLUTIDE
+  - SAXENDA
+  - XULTOPHY
+  - VICTOZA
+  comparators:
+  - - INSULIN DETEMIR
+    - LEVEMIR
+  - - INSULIN DEGLUDEC
+    - TRESIBA
+    - XULTOPHY
+  - - INSULIN, REGULAR, HUMAN
+    - NOVOLIN
+    - HUMULIN
+    - AFREZZA
+  - - INSULIN GLARGINE
+    - TOUJEO
+    - BASAGLAR
+    - SOLIQUA

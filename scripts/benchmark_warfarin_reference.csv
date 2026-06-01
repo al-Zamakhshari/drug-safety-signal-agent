@@ -1,4 +1,4 @@
-# openFDA reference (independent of local OpenSearch),drug=WARFARIN,"drug_total_openfda=215,692","n_total_openfda=20,328,575",fetched=2026-06-02T08:21:33
+# openFDA reference (independent of local OpenSearch),drug=WARFARIN,"drug_total_openfda=215,692","n_total_openfda=20,328,575",fetched=2026-06-02T10:19:13
 reaction,n,PRR,PRR_lower_95,PRR_upper_95,ROR,ROR_lower_95,ROR_upper_95
 INTERNATIONAL NORMALISED RATIO INCREASED,16254,125.79,122.91,128.74,135.96,132.74,139.26
 HAEMATOMA,2610,10.67,10.25,11.11,10.79,10.36,11.24
