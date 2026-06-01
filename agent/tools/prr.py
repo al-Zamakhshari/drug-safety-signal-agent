@@ -50,6 +50,60 @@ load_dotenv()
 
 INDEX = os.getenv("OPENSEARCH_INDEX", "faers_reports")
 
+# ── Stratification helpers ──────────────────────────────────────────────────
+
+# Age bands for stratified PRR (FAERS standard, EMA guidance)
+# patient_age is stored in years (after age_cod normalization in faers_zip_indexer.py)
+AGE_BANDS = [
+    {"key": "<18",   "to":   18.0},
+    {"key": "18-44", "from": 18.0, "to":  45.0},
+    {"key": "45-64", "from": 45.0, "to":  65.0},
+    {"key": "65-74", "from": 65.0, "to":  75.0},
+    {"key": "75+",   "from": 75.0},
+]
+
+# FAERS patient_sex code → readable label
+# ZIP path: raw FAERS codes ("0","1","2"); API path: same numeric strings
+SEX_LABELS = {"0": "Unknown", "1": "Male", "2": "Female"}
+
+# FAERS reporter_type codes → readable label
+# ZIP path: rept_cod / i_f_cod codes; API path: primarysource.qualification codes
+REPORTER_LABELS = {
+    # FAERS (2012+) rept_cod
+    "EXP": "Expedited",    "DIR": "Direct",
+    "PER": "Periodic",     "15DAY": "15-day",
+    # openFDA qualification codes (API path)
+    "1": "Physician",      "2": "Pharmacist",
+    "3": "Other HCP",      "4": "Lawyer",
+    "5": "Consumer/Patient",
+    # AERS (pre-2012) i_f_cod
+    "I": "Initial",        "F": "Follow-up",
+}
+
+
+def _stratification_agg(stratify_by: str) -> dict:
+    """
+    Build the outer OpenSearch aggregation for the chosen stratification field.
+    Returns a dict suitable for use as the 'strata' agg value.
+    """
+    if stratify_by == "age":
+        return {
+            "range": {
+                "field": "patient_age",
+                "ranges": AGE_BANDS,
+            }
+        }
+    elif stratify_by in ("sex", "reporter_type"):
+        return {
+            "terms": {
+                "field": stratify_by,
+                "size": 10,
+                "missing": "Unknown",
+            }
+        }
+    else:
+        raise ValueError(f"stratify_by must be 'age', 'sex', or 'reporter_type', got {stratify_by!r}")
+
 
 def _yates_chi2(a: int, b: int, c: int, d: int) -> float:
     """
@@ -139,6 +193,7 @@ async def calculate_prr(
     top_n: int = 50,
     min_count: int = 3,
     min_prr: float = 2.0,
+    stratify_by: str | None = None,
 ) -> dict[str, Any]:
     """
     Calculate PRR signals for a drug against the full FAERS population.
@@ -150,12 +205,18 @@ async def calculate_prr(
       4. Compute 2×2 table, PRR, Yates χ², 95% CI for ALL reactions with n≥3.
       5. Apply Benjamini–Hochberg FDR correction across all m reactions tested.
       6. Return signals with PRR ≥ min_prr, annotated with robust/fdr fields.
+      7. Annotate with EBGM/EB05 (GPS, DuMouchel 1999).
+      8. Annotate with IC/IC025 (BCPNN, Bate 1998 / Norén 2006).
+      9. If stratify_by is set, compute Mantel-Haenszel stratified PRR using
+         the chosen stratification variable (age | sex | reporter_type).
 
     Args:
-        drug_names: List of drug name variants in ALL CAPS
-        top_n:      Number of top reactions to check for the drug (default 50)
-        min_count:  Minimum drug reports per reaction (EMA: n ≥ 3)
-        min_prr:    Minimum PRR threshold (EMA: ≥ 2.0)
+        drug_names:   List of drug name variants in ALL CAPS
+        top_n:        Number of top reactions to check for the drug (default 50)
+        min_count:    Minimum drug reports per reaction (EMA: n ≥ 3)
+        min_prr:      Minimum PRR threshold (EMA: ≥ 2.0)
+        stratify_by:  Optional — one of 'age', 'sex', 'reporter_type'.
+                      Adds prr_mh, prr_mh_lower, prr_mh_upper to each signal.
     """
     client = _client()
     try:
@@ -272,25 +333,212 @@ async def calculate_prr(
         signals.sort(key=lambda x: -x["prr"])
 
         # Step 7: annotate with EBGM / EB05 (Gamma-Poisson Shrinker, DuMouchel 1999)
-        # Fit the GPS prior once across all signals for this drug.
-        # This is the industry-standard Bayesian shrinkage estimator used by FDA/WHO.
+        # FDA MGPS standard — shrinks PRR=15 on n=3 down to EB05≈1.1.
         try:
             from agent.tools.ebgm import annotate_signals_with_ebgm
             signals = annotate_signals_with_ebgm(signals, drug_total, faers_total)
         except Exception:
             pass   # EBGM is supplemental — never block the main PRR result
 
+        # Step 8: annotate with BCPNN IC (WHO Uppsala standard, Bate 1998 / Norén 2006)
+        # Complements EBGM via a Beta-Binomial prior.  IC025 > 0 is the WHO signal flag.
+        try:
+            from agent.tools.bcpnn import annotate_signals_with_bcpnn
+            signals = annotate_signals_with_bcpnn(signals, drug_total, faers_total)
+        except Exception:
+            pass   # BCPNN is supplemental — never block the main PRR result
+
+        # Step 9: Mantel–Haenszel stratified PRR (optional, gated on stratify_by)
+        # Adds prr_mh, prr_mh_lower, prr_mh_upper, prr_strat_field to each signal.
+        # Uses the same MH estimator as anomaly_signals.py (quarterly strata → here
+        # age bands / sex / reporter type). Detects Simpson's paradox confounding.
+        if stratify_by and signals:
+            try:
+                signals = await _calculate_stratified_prr(
+                    client_ref=client,
+                    drug_names=drug_names,
+                    reaction_keys=[s["reaction"] for s in signals],
+                    signals=signals,
+                    stratify_by=stratify_by,
+                )
+            except Exception as exc:
+                # Stratified PRR is supplemental — log but don't block
+                for s in signals:
+                    s["prr_mh"]       = None
+                    s["prr_mh_lower"] = None
+                    s["prr_mh_upper"] = None
+                    s["prr_strat_field"] = stratify_by
+
         return {
-            "drug_names":   drug_names,
-            "drug_total":   drug_total,
-            "faers_total":  faers_total,
-            "signals":      signals,
-            "signal_count": len(signals),
-            "tested_count": m,   # total reactions tested (BH denominator)
+            "drug_names":    drug_names,
+            "drug_total":    drug_total,
+            "faers_total":   faers_total,
+            "signals":       signals,
+            "signal_count":  len(signals),
+            "tested_count":  m,   # total reactions tested (BH denominator)
+            "stratify_by":   stratify_by,
         }
 
     finally:
         await client.close()
+
+
+async def _calculate_stratified_prr(
+    client_ref,
+    drug_names: list[str],
+    reaction_keys: list[str],
+    signals: list[dict],
+    stratify_by: str,
+) -> list[dict]:
+    """
+    Compute Mantel–Haenszel stratified PRR for each signal reaction.
+
+    For each stratum k (age band / sex / reporter type) and each reaction R:
+      a_k  = drug reports with R in stratum k
+      n1_k = drug total in stratum k
+      c_k  = (all reports with R in stratum k) − a_k
+      n2_k = (all reports in stratum k) − n1_k
+
+    Pass all strata to _mh_rate_ratio (imported from anomaly_signals) to
+    get the Mantel–Haenszel estimate and Robins–Breslow–Greenland CI.
+
+    Adds to each signal: prr_mh, prr_mh_lower, prr_mh_upper, prr_strat_field,
+    and prr_strata_detail (list of per-stratum crude PRRs for inspection).
+    """
+    from agent.tools.anomaly_signals import _mh_rate_ratio
+
+    strat_agg = _stratification_agg(stratify_by)
+
+    # Query 1: drug-subset counts per stratum per reaction
+    drug_resp = await client_ref.search(
+        index=INDEX,
+        body={
+            "size": 0,
+            "query": {"terms": {"drug_names": drug_names}},
+            "aggs": {
+                "strata": {
+                    **strat_agg,
+                    "aggs": {
+                        "stratum_total": {"value_count": {"field": "safetyreportid"}},
+                        "per_reaction": {
+                            "filters": {
+                                "filters": {
+                                    rxn: {"term": {"reactions": rxn}}
+                                    for rxn in reaction_keys
+                                }
+                            }
+                        },
+                    },
+                }
+            },
+        },
+    )
+
+    # Query 2: population counts per stratum per reaction
+    pop_resp = await client_ref.search(
+        index=INDEX,
+        body={
+            "size": 0,
+            "aggs": {
+                "strata": {
+                    **strat_agg,
+                    "aggs": {
+                        "stratum_total": {"value_count": {"field": "safetyreportid"}},
+                        "per_reaction": {
+                            "filters": {
+                                "filters": {
+                                    rxn: {"term": {"reactions": rxn}}
+                                    for rxn in reaction_keys
+                                }
+                            }
+                        },
+                    },
+                }
+            },
+        },
+    )
+
+    # Parse stratum buckets from both queries
+    def _parse_strata(resp):
+        buckets = resp["aggregations"]["strata"].get("buckets", {})
+        if isinstance(buckets, dict):           # range/filters agg → dict
+            return {k: v for k, v in buckets.items()}
+        return {b.get("key_as_string", str(b.get("key", ""))): b for b in buckets}
+
+    drug_strata = _parse_strata(drug_resp)
+    pop_strata  = _parse_strata(pop_resp)
+
+    # Code → label maps for readable stratum names
+    label_map = SEX_LABELS if stratify_by == "sex" else (
+        REPORTER_LABELS if stratify_by == "reporter_type" else {}
+    )
+
+    # Build per-reaction MH inputs
+    signal_map = {s["reaction"]: s for s in signals}
+
+    for rxn in reaction_keys:
+        s = signal_map.get(rxn)
+        if s is None:
+            continue
+
+        mh_strata      = []
+        strata_detail  = []
+
+        for stratum_key, drug_bucket in drug_strata.items():
+            pop_bucket = pop_strata.get(stratum_key)
+            if pop_bucket is None:
+                continue
+
+            n1_k = drug_bucket.get("stratum_total", {}).get("value", 0) or 0
+            N_k  = pop_bucket.get("stratum_total",  {}).get("value", 0) or 0
+
+            drug_rxn_count = (
+                drug_bucket.get("per_reaction", {})
+                           .get("buckets", {})
+                           .get(rxn, {})
+                           .get("doc_count", 0)
+            ) or 0
+            pop_rxn_count  = (
+                pop_bucket.get("per_reaction", {})
+                          .get("buckets", {})
+                          .get(rxn, {})
+                          .get("doc_count", 0)
+            ) or 0
+
+            if n1_k <= 0 or N_k <= 0:
+                continue
+
+            a_k  = drug_rxn_count
+            n2_k = N_k - n1_k
+            c_k  = pop_rxn_count - a_k  # non-drug reports with reaction
+
+            if n2_k <= 0:
+                continue
+
+            mh_strata.append({
+                "drug_count": a_k,
+                "drug_total": n1_k,
+                "comp_count": max(c_k, 0),
+                "comp_total": n2_k,
+            })
+
+            # Per-stratum crude PRR for transparency
+            crude_prr = None
+            if n1_k > 0 and n2_k > 0 and c_k > 0 and a_k > 0:
+                crude_prr = round((a_k / n1_k) / (c_k / n2_k), 2)
+            label = label_map.get(str(stratum_key), stratum_key)
+            strata_detail.append({"stratum": label, "n": a_k, "prr": crude_prr})
+
+        # MH estimate from all strata
+        rr_mh, mh_lo, mh_hi = _mh_rate_ratio(mh_strata) if mh_strata else (None, None, None)
+
+        s["prr_mh"]          = round(rr_mh, 2) if rr_mh else None
+        s["prr_mh_lower"]    = round(mh_lo, 2) if mh_lo else None
+        s["prr_mh_upper"]    = round(mh_hi, 2) if mh_hi else None
+        s["prr_strat_field"] = stratify_by
+        s["prr_strata"]      = strata_detail
+
+    return signals
 
 
 async def get_drug_names(drug_name: str) -> dict[str, Any]:

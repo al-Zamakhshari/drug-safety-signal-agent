@@ -152,6 +152,7 @@ def _parse_zip(zf: zipfile.ZipFile, target_drugs: set[str]) -> list[dict]:
                 ("fda_dt",       ["fda_dt", "event_dt"]),
                 ("serious",      ["serious"]),
                 ("age",          ["age"]),
+                ("age_cod",      ["age_cod"]),              # unit: DEC/YR/MON/WK/DY/HR
                 ("sex",          ["sex", "gndr_cod"]),      # gndr_cod = pre-2012
                 ("occr_country", ["occr_country", "reporter_country", "to_mfr"]),
                 ("rept_cod",     ["rept_cod", "i_f_cod"]),  # i_f_cod = pre-2012
@@ -182,11 +183,30 @@ def _parse_zip(zf: zipfile.ZipFile, target_drugs: set[str]) -> list[dict]:
         if not safetyid or not receivedate:
             continue
 
-        # age
+        # age — normalize to years using age_cod unit field
+        # FAERS age_cod values: DEC=decade, YR=year, MON=month, WK=week, DY=day, HR=hour
+        # Without normalization, a 6-month-old (age=6, age_cod=MON) would be binned as ≥18.
         age = None
         try:
             age_val = row.get("age") or ""
-            age = float(age_val) if age_val else None
+            age_cod = str(row.get("age_cod") or "").upper().strip()
+            if age_val:
+                raw_age = float(age_val)
+                # Convert to years
+                if age_cod == "DEC":
+                    age = raw_age * 10.0
+                elif age_cod in ("YR", ""):
+                    age = raw_age            # default assumption: years
+                elif age_cod == "MON":
+                    age = raw_age / 12.0
+                elif age_cod == "WK":
+                    age = raw_age / 52.18
+                elif age_cod == "DY":
+                    age = raw_age / 365.25
+                elif age_cod == "HR":
+                    age = raw_age / 8_766.0
+                else:
+                    age = raw_age            # unknown unit — store raw, document caveat
         except (ValueError, TypeError):
             pass
 

@@ -1,0 +1,53 @@
+# Comparator groups for within-class disproportionality (Mantel-Haenszel)
+#
+# Each entry defines one index drug and its therapeutic comparator groups.
+# The within-class rate ratio is computed as:
+#   drug_rate / mean(comparator_rates)  →  pooled across all comparator groups
+#
+# To add a new drug:
+#   Option 1 (recommended): auto-discover via RxClass ATC lookup:
+#     uv run python -m ingestion.discover_comparators --drug <name>
+#     # Review the appended entry, then rebuild the index:
+#     uv run python -m ingestion.compute_class_ratio --drug <name>
+#
+#   Option 2: add manually following the structure below, then run:
+#     uv run python -m ingestion.compute_class_ratio --drug <name>
+#
+# Field guide:
+#   names:        List of FAERS drug_names[] values (ALL CAPS).
+#                 Use RxNorm brand names exactly as they appear in your FAERS index.
+#   comparators:  List of comparator drug name groups. Each group is a list of
+#                 name variants for the same drug (generic + brand names).
+#                 Each group contributes one data point to the within-class pool.
+
+SEMAGLUTIDE:
+  names:
+    - SEMAGLUTIDE
+    - OZEMPIC
+    - WEGOVY
+    - RYBELSUS
+  comparators:
+    - [LIRAGLUTIDE, VICTOZA, SAXENDA]
+    - [DULAGLUTIDE, TRULICITY]
+    - [TIRZEPATIDE, MOUNJARO, ZEPBOUND]
+    - [EMPAGLIFLOZIN, JARDIANCE]
+    - [SITAGLIPTIN, JANUVIA]
+
+ROFECOXIB:
+  names:
+    - ROFECOXIB
+    - VIOXX
+  comparators:
+    - [CELECOXIB, CELEBREX]
+    - [IBUPROFEN]
+    - [NAPROXEN]
+
+LIRAGLUTIDE:
+  names:
+    - LIRAGLUTIDE
+    - VICTOZA
+    - SAXENDA
+  comparators:
+    - [SEMAGLUTIDE, OZEMPIC]
+    - [DULAGLUTIDE, TRULICITY]
+    - [TIRZEPATIDE, MOUNJARO]

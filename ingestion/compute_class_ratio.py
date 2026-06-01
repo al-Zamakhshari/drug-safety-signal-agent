@@ -6,23 +6,27 @@ Method:
   drug_rate(D, R, Q) = count(D+R+Q) / count(D+Q)
   comp_rate(class, R, Q) = Σ count(C+R+Q) / Σ count(C+Q)  [pooled across comparators]
 
-This is a within-class rate ratio — it answers: "Is this drug's reporting rate for
-reaction R higher than its therapeutic class's pooled rate, after controlling for
-class-level effects?"
+Comparator groups are loaded from config/comparators.yaml.
+To add a new drug without editing Python:
+  uv run python -m ingestion.discover_comparators --drug <name>   # auto-discovers via RxClass
+  uv run python -m ingestion.compute_class_ratio --drug <DRUG_KEY>
 
-Zero cells: when a reaction appears in the drug but not the comparator pool,
-Haldane–Anscombe continuity (+0.5) is applied to avoid divide-by-zero.
-The raw comp_count=0 is preserved in the index; the adjusted ratio is large-but-finite,
-and the downstream 95% CI (in anomaly_signals.py) will be appropriately wide.
-This replaces the previous 999.0 sentinel, which was statistically undefined.
+Zero cells: Haldane–Anscombe +0.5 continuity applied when comp_count=0.
 
 Output index: faers_ml_rates — one doc per (drug, reaction, quarter).
 
 Usage:
-    uv run python -m ingestion.compute_class_ratio
+    uv run python -m ingestion.compute_class_ratio                    # all drugs in YAML
+    uv run python -m ingestion.compute_class_ratio --drug SEMAGLUTIDE # one drug
 """
 
-import asyncio, os, math
+import argparse
+import asyncio
+import os
+import math
+from pathlib import Path
+
+import yaml
 from opensearchpy import helpers
 from agent.os_client import client as _client
 from dotenv import load_dotenv
@@ -31,31 +35,36 @@ load_dotenv()
 
 SOURCE_INDEX = os.getenv("OPENSEARCH_INDEX", "faers_reports")
 RATES_INDEX  = "faers_ml_rates"
+CONFIG_FILE  = Path(__file__).parent.parent / "config" / "comparators.yaml"
 
-DRUG_GROUPS = {
-    "SEMAGLUTIDE": {
-        "names":       ["SEMAGLUTIDE", "OZEMPIC", "WEGOVY", "RYBELSUS"],
-        "comparators": [
-            ["LIRAGLUTIDE", "VICTOZA", "SAXENDA"],
-            ["DULAGLUTIDE", "TRULICITY"],
-            ["TIRZEPATIDE", "MOUNJARO", "ZEPBOUND"],
-            ["EMPAGLIFLOZIN", "JARDIANCE"],
-            ["SITAGLIPTIN", "JANUVIA"],
-        ],
-    },
-    "ROFECOXIB": {
-        "names":       ["ROFECOXIB", "VIOXX"],
-        "comparators": [["CELECOXIB", "CELEBREX"], ["IBUPROFEN"], ["NAPROXEN"]],
-    },
-    "LIRAGLUTIDE": {
-        "names":       ["LIRAGLUTIDE", "VICTOZA", "SAXENDA"],
-        "comparators": [
-            ["SEMAGLUTIDE", "OZEMPIC"],
-            ["DULAGLUTIDE", "TRULICITY"],
-            ["TIRZEPATIDE", "MOUNJARO"],
-        ],
-    },
-}
+
+def load_comparators(drug_key: str | None = None) -> dict:
+    """
+    Load comparator groups from config/comparators.yaml.
+    Keys are normalised to UPPER CASE to match FAERS drug_names field.
+    If drug_key is given, return only that drug's entry.
+    """
+    if not CONFIG_FILE.exists():
+        raise FileNotFoundError(
+            f"Comparator config not found: {CONFIG_FILE}\n"
+            "Create it with: uv run python -m ingestion.discover_comparators --drug <name>"
+        )
+    with open(CONFIG_FILE) as f:
+        raw = yaml.safe_load(f) or {}
+
+    groups = {k.upper(): v for k, v in raw.items()}
+
+    if drug_key is not None:
+        key = drug_key.upper()
+        if key not in groups:
+            available = ", ".join(sorted(groups.keys()))
+            raise KeyError(
+                f"'{key}' not found in comparators.yaml (available: {available}).\n"
+                f"Add it: uv run python -m ingestion.discover_comparators --drug {drug_key}"
+            )
+        return {key: groups[key]}
+
+    return groups
 
 RATES_MAPPING = {
     "mappings": {
@@ -228,25 +237,44 @@ async def compute_and_index(drug_key: str, group: dict) -> int:
         await client.close()
 
 
-async def main():
+async def main(drug_key: str | None = None) -> None:
+    drug_groups = load_comparators(drug_key)
+
     client = _client()
     try:
-        await client.indices.create(index=RATES_INDEX, body=RATES_MAPPING)
-        print(f"Created index: {RATES_INDEX}")
-    except Exception:
-        print(f"Index {RATES_INDEX} already exists — dropping and recreating")
-        await client.indices.delete(index=RATES_INDEX)
-        await client.indices.create(index=RATES_INDEX, body=RATES_MAPPING)
-        print(f"Recreated index: {RATES_INDEX}")
+        if drug_key is None:
+            # Full rebuild — drop and recreate index
+            try:
+                await client.indices.create(index=RATES_INDEX, body=RATES_MAPPING)
+                print(f"Created index: {RATES_INDEX}")
+            except Exception:
+                print(f"Index {RATES_INDEX} already exists — dropping and recreating")
+                await client.indices.delete(index=RATES_INDEX)
+                await client.indices.create(index=RATES_INDEX, body=RATES_MAPPING)
+                print(f"Recreated index: {RATES_INDEX}")
+        else:
+            # Single-drug mode — ensure index exists, don't drop it
+            try:
+                await client.indices.create(index=RATES_INDEX, body=RATES_MAPPING)
+                print(f"Created index: {RATES_INDEX}")
+            except Exception:
+                print(f"Index {RATES_INDEX} already exists — appending {drug_key}")
     finally:
         await client.close()
 
     total = 0
-    for drug_key, group in DRUG_GROUPS.items():
-        total += await compute_and_index(drug_key, group)
+    for dk, group in drug_groups.items():
+        total += await compute_and_index(dk, group)
 
     print(f"\n✅ Done — {total:,} class_ratio docs indexed")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--drug", default=None,
+        help="Process only this drug (UPPER CASE key from comparators.yaml). "
+             "Omit to rebuild all drugs.",
+    )
+    args = parser.parse_args()
+    asyncio.run(main(drug_key=args.drug))

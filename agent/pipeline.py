@@ -143,9 +143,10 @@ _deep_investigator_agent = create_react_agent(
 class DrugSafetyState(TypedDict):
     drug_name:          str
     drug_names:         list[str]
-    prr_signals:        list[dict]   # [{reaction, prr, prr_lower, prr_upper, robust, q_value, fdr_significant, ...}]
+    prr_signals:        list[dict]   # [{reaction, prr, prr_lower, prr_upper, robust, q_value, fdr_significant, ebgm, eb05, ic, ic025, ...}]
     drug_total:         int
     faers_total:        int
+    prr_strat_field:    Optional[str]  # which field was used for stratified PRR (None = unstratified)
     anomaly_signals:    list[dict]   # [{reaction, class_ratio, class_ratio_lower, class_ratio_upper, ...}]
     label_text:         str          # raw label text for token-overlap matching
     llt_expansions:     dict         # PT → [LLT synonyms], pre-fetched from openFDA
@@ -397,14 +398,22 @@ async def save_memory(state: DrugSafetyState) -> dict:
 
 
 async def calculate_prr_signals(state: DrugSafetyState) -> dict:
-    result = await calculate_prr(state["drug_names"], top_n=50)
+    # stratify_by can be set via env var for advanced usage
+    # Default: "reporter_type" — highest-yield FAERS confounder (consumer vs physician)
+    # Override: STRATIFY_PRR=age | sex | reporter_type | "" (empty = disable)
+    import os as _os
+    stratify_by_env = _os.getenv("STRATIFY_PRR", "reporter_type").strip() or None
+    result = await calculate_prr(state["drug_names"], top_n=50, stratify_by=stratify_by_env)
     signals = result.get("signals", [])
+    strat = result.get("stratify_by")
     print(f"  [PRR]    {result['drug_total']:,} reports | "
-          f"{result['faers_total']:,} total | {len(signals)} signals")
+          f"{result['faers_total']:,} total | {len(signals)} signals"
+          + (f" | stratified by {strat}" if strat else ""))
     return {
-        "prr_signals": signals,
-        "drug_total":  result["drug_total"],
-        "faers_total": result["faers_total"],
+        "prr_signals":     signals,
+        "drug_total":      result["drug_total"],
+        "faers_total":     result["faers_total"],
+        "prr_strat_field": strat,
     }
 
 
@@ -756,18 +765,37 @@ async def write_report(state: DrugSafetyState) -> dict:
         ebgm_col   = str(s.get("ebgm", "—"))
         eb05_col   = str(s.get("eb05", "—"))
         eb05_flag  = "✓" if s.get("eb05_signal") else ("~" if s.get("eb05") else "—")
+        ic_col     = str(s.get("ic",   "—"))
+        ic025_col  = str(s.get("ic025","—"))
+        ic_flag    = "✓" if s.get("ic_signal") else ("~" if s.get("ic") else "—")
         inv_col    = inv_tags.get(rxn, "—")
+        # Stratified PRR (MH) — only shown when stratify_by was requested
+        mh_col = ""
+        if s.get("prr_strat_field"):
+            mh_lo = s.get("prr_mh_lower")
+            mh_hi = s.get("prr_mh_upper")
+            mh_ci = f"{mh_lo}–{mh_hi}" if mh_lo is not None else "—"
+            mh_val = str(s.get("prr_mh", "—"))
+            mh_col = f" | {mh_val} ({mh_ci})"
         prr_rows.append(
             f"| {rxn} | {s['prr']} ({prr_ci_col}) | {ror_col} ({ror_ci_col}) | "
             f"{ebgm_col} / {eb05_col} {eb05_flag} | "
+            f"{ic_col} / {ic025_col} {ic_flag} | "
             f"{chi2_badge}{robust_col}{fdr_col} | "
-            f"{s['drug_count']} | {is_labeled} | {papers} | {inv_col} |"
+            f"{s['drug_count']} | {is_labeled} | {papers} | {inv_col}{mh_col} |"
         )
+    # Determine if stratified PRR is available and which field was used
+    strat_field = state.get("prr_strat_field") or (
+        state["prr_signals"][0].get("prr_strat_field") if state["prr_signals"] else None
+    )
+    strat_header = f" | PRR_MH ({strat_field})" if strat_field else ""
+    strat_sep    = " |------" if strat_field else ""
+
     prr_block = (
-        "### PRR + ROR + EBGM Signals (EMA/FDA standards)\n"
-        "| Reaction | PRR (95% CI) | ROR (95% CI) | EBGM / EB05 | χ²/CI/FDR | Reports | In FDA Label? | Lit | Investigation |\n"
-        "|----------|-------------|-------------|-------------|-----------|---------|---------------|-----|---------------|\n"
-        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — | — | — | — |")
+        "### PRR + ROR + EBGM + BCPNN Signals (EMA/FDA/WHO standards)\n"
+        f"| Reaction | PRR (95% CI) | ROR (95% CI) | EBGM / EB05 | IC / IC025 | χ²/CI/FDR | Reports | In FDA Label? | Lit | Investigation{strat_header} |\n"
+        f"|----------|-------------|-------------|-------------|-----------|-----------|---------|---------------|-----|---------------{strat_sep}|\n"
+        + ("\n".join(prr_rows) if prr_rows else "| No signals detected | — | — | — | — | — | — | — | — | — |")
     )
 
     # ── Deterministic within-class disproportionality table (Python, not LLM) ─

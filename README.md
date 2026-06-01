@@ -429,13 +429,12 @@ This tool is a **PRR + within-class disproportionality screener**. It is compara
 
 | Limitation | Impact |
 |------------|--------|
-| **No BCPNN** (Bayesian Confidence Propagation Neural Network) | EBGM/GPS is implemented. BCPNN is WHO Uppsala's alternative Bayesian approach — not yet added. |
-| **No stratification** (age / sex / reporter type) | Simpson's paradox confounding is unaddressed |
+| **Single-variable stratification only** | Stratified PRR (MH) supports one variable at a time (age / sex / reporter_type via `STRATIFY_PRR` env var). Cross-stratification (age × sex) is not supported. |
+| **Age banding requires year-unit age data** | ZIP-ingested data now normalises age_cod (DEC/YR/MON/WK) to years. API-ingested data uses years natively. Data ingested before this fix should be re-indexed for accurate age bands. |
 | **No exposure normalisation** | PRR measures reporting rate, not incidence |
 | **FAERS structural biases** | Duplicate reports, Weber effect, notoriety/litigation bias (relevant for rofecoxib), stimulated reporting, co-medication confounding — all inherent to spontaneous reporting |
 | **Drug's top-N reactions capped at 50** | Reactions ranked >50 in the drug's profile are not tested |
-| **Comparator set is fixed** | Only 3 drugs with pre-configured comparators. For other drugs, the within-class table is empty. |
-| **MH stratifies by quarter only** | Comparator drugs within a quarter are pooled. Full stratification by (quarter × comparator) requires per-comparator counts in the index. |
+| **MH stratifies by quarter only (within-class)** | Comparator drugs within a quarter are pooled. Full stratification by (quarter × comparator) requires per-comparator counts in the index. |
 | **BH-FDR uses Yates-conservative p-values** | Over-conservative (fewer false signals) — exact Fisher p-values would be more standard. |
 
 ---
@@ -503,9 +502,10 @@ Phoenix is **not** started by default — `docker compose up -d` runs the pipeli
 - [x] openFDA independent benchmark (1.7% median Δ on mechanism signals)
 - [x] Web UI — FastAPI + SSE streaming, dark-mode
 - [x] GitHub Actions CI — pure-function tests + schema smoke-import on every push
-- [ ] Stratified PRR (by age / sex / reporter type)
-- [ ] BCPNN (Bayesian Confidence Propagation Neural Network — WHO Uppsala)
-- [ ] Configurable comparator groups (currently hardcoded for 3 drugs)
+- [x] Stratified PRR — Mantel-Haenszel by age / sex / reporter_type (set `STRATIFY_PRR` env var)
+- [x] BCPNN / IC / IC025 — WHO Uppsala standard (Bate 1998 / Norén 2006)
+- [x] Configurable comparators — `config/comparators.yaml` + auto-discovery via RxClass ATC
+- [ ] Cross-stratification (age × sex × reporter_type simultaneously)
 
 ---
 
