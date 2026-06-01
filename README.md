@@ -272,9 +272,9 @@ The first implementation used a single prompt listing all signals. Thinking mode
 
 ---
 
-### 7. OpenSearch over Elasticsearch
+### 7. Why OpenSearch
 
-OpenSearch is Apache 2.0. Elasticsearch moved to SSPL in 7.11 (2021) — not OSI-approved, incompatible with many open-source use cases. OpenSearch 3.6 has everything we need: `filters` aggregation for per-reaction baseline, ML Memory for cross-run signal persistence, DataDistributionTool for time-period analysis, built-in MCP server for free-form investigation. Zero license friction for a tool intended to be shared.
+OpenSearch 3.6 (Apache 2.0) provides everything the pipeline needs in a single, self-hosted, zero-cost stack: the `filters` aggregation for per-reaction baseline without top-N truncation, ML Memory for cross-run signal persistence, DataDistributionTool for time-period analysis, and a built-in MCP server for free-form investigation. Running locally means no data leaves the machine — important for any work involving patient-level adverse event reports.
 
 ---
 
@@ -511,7 +511,7 @@ Phoenix is **not** started by default — `docker compose up -d` runs the pipeli
 
 ## Related
 
-**Hackathon version** (Elasticsearch + Elastic ML + Kibana MCP + Gemini API):  
+**Cloud / API version** — built for the Google Cloud Rapid Agent Hackathon (Elastic track), uses managed cloud services and Gemini API:  
 → [google-cloud-rapid-agent-hackathon](https://github.com/al-Zamakhshari/google-cloud-rapid-agent-hackathon)
 
 ---
