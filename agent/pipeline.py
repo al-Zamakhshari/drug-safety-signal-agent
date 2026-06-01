@@ -62,16 +62,10 @@ def _model_31b():
     than E2B (4B → 31B active params). Falls back to local E2B if no key.
     """
     if not GOOGLE_API_KEY:
-        # E4B as local investigator — 100% classification rate vs 0% for E2B.
-        # E2B gets cut off mid-sentence before writing the classification tag.
-        # E4B uses 2000 tokens efficiently: tools + clean synthesis.
-        return ChatOpenAI(
-            model="docker.io/ai/gemma4:E4B",
-            base_url=LOCAL_MODEL_URL,
-            api_key="docker",
-            max_tokens=2000,
-            temperature=0,
-        )
+        # E2B works correctly for investigation at 2000 tokens.
+        # Earlier "0% classification rate" was a false negative — our test
+        # checked only the last 60 chars; E2B writes CLASS_EFFECT mid-response.
+        return _model(max_tokens=2000)
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
