@@ -28,9 +28,12 @@ from agent.tools.prr import calculate_prr, get_drug_names
 from agent.tools.openfda import get_drug_label
 from agent.tools.pubmed import search_literature
 from agent.tools.anomaly_signals import get_anomaly_signals
-from agent.tools.signal_memory import save_finding, search_findings
+from agent.tools.signal_memory import (
+    save_finding, search_findings,
+    load_last_run, save_run_signals, build_memory_context,
+)
 from agent.tools.investigator_tools import (
-    get_prr, check_class_effect, get_signal_trend,
+    get_prr, check_class_effect, get_signal_trend, compare_time_periods,
 )
 from agent.tools.opensearch_mcp import list_opensearch_tools, call_opensearch_tool
 
@@ -130,8 +133,9 @@ _deep_investigator_agent = create_react_agent(
         get_prr,                  # verify with different name variants
         check_class_effect,       # expand comparator set
         get_signal_trend,         # zoom into specific time periods
+        compare_time_periods,     # typed DataDistributionTool wrapper — EMERGING/GROWING test
         list_opensearch_tools,    # discover registered OS MCP tools
-        call_opensearch_tool,     # DataDistributionTool, search_faers, etc.
+        call_opensearch_tool,     # search_faers, AD tools, etc.
     ],
 )
 
@@ -153,6 +157,9 @@ class DrugSafetyState(TypedDict):
     literature:         list[dict]
     past_findings:      list[dict]   # from ML Memory — prior run results
     investigation:      list[dict]
+    classifications:    list[dict]   # per-reaction parsed Phase-1 output [{reaction, effect, trend, ratio, persistent}]
+    signal_status:      list[dict]   # cross-run status [{reaction, status, prr, prr_prior, effect, trend}]
+    _prior_run:         Optional[dict]  # raw prior run doc from agent-signal-runs (internal)
     briefing:           str
     error:              Optional[str]
 
@@ -346,6 +353,56 @@ def _label_match_display(
 
 
 # ---------------------------------------------------------------------------
+# Phase-1 output parser — robust structured extraction
+# ---------------------------------------------------------------------------
+
+# Tokens expected on the CLASSIFICATION line
+_EFFECT_TOKENS = {"CLASS_EFFECT", "DRUG_SPECIFIC"}
+_TREND_TOKENS  = {"GROWING", "STABLE", "EMERGING"}
+
+
+def _parse_classification(reaction: str, text: str) -> dict:
+    """
+    Parse the structured Phase-1 investigator output for ONE reaction section.
+
+    Expected format (from the investigation prompt):
+      CLASSIFICATION: [CLASS_EFFECT|DRUG_SPECIFIC] | [GROWING|STABLE|EMERGING] | PERSISTENT
+      RATIO: {drug} is [X]x lowest comparator ([name]=[value])
+      INSIGHT: ...
+
+    Returns {effect, trend, ratio, persistent} with None where not found.
+    Rejects template echoes (lines containing '[' — model echoed the prompt).
+    """
+    out: dict = {"reaction": reaction, "effect": None, "trend": None,
+                 "ratio": None, "persistent": False}
+
+    m = re.search(r"CLASSIFICATION:\s*([^\n]+)", text, re.IGNORECASE)
+    if m:
+        line = m.group(1).upper()
+        if "[" not in line:   # real output, not template echo
+            for tok in _EFFECT_TOKENS:
+                if re.search(rf"\b{tok}\b", line):
+                    out["effect"] = tok
+                    break
+            for tok in _TREND_TOKENS:
+                if re.search(rf"\b{tok}\b", line):
+                    out["trend"] = tok
+                    break
+            out["persistent"] = bool(re.search(r"\bPERSISTENT\b", line))
+
+    # RATIO line: capture the numeric value immediately before 'x'
+    # Handles: "5.36x", "5.36 x", "is 5.36x lowest", "drug is 7x"
+    rm = re.search(r"RATIO:[^\n]*?(\d+(?:\.\d+)?)\s*x\b", text, re.IGNORECASE)
+    if rm:
+        try:
+            out["ratio"] = float(rm.group(1))
+        except ValueError:
+            pass
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Python nodes — no LLM
 # ---------------------------------------------------------------------------
 
@@ -357,17 +414,32 @@ async def resolve_names(state: DrugSafetyState) -> dict:
 
 
 async def load_memory(state: DrugSafetyState) -> dict:
-    """Load past findings from ML Memory — gives investigator cross-run context."""
+    """
+    Load past findings from both memory stores:
+      - ML Memory text trail (for investigator prose context)
+      - Structured run store (for per-reaction PRR delta / trajectory)
+    """
+    findings: list[dict] = []
+    prior_run: dict | None = None
     try:
         findings = await search_findings(state["drug_name"], top_n=3)
         if findings and "error" not in findings[0]:
             print(f"  [memory] {len(findings)} past run(s) found in ML Memory")
         else:
             print(f"  [memory] first run for {state['drug_name']} — no prior findings")
+            findings = []
     except Exception as e:
-        findings = []
         print(f"  [memory] unavailable ({e})")
-    return {"past_findings": findings}
+
+    try:
+        prior_run = await load_last_run(state["drug_name"])
+        if prior_run:
+            n_prior = len(prior_run.get("signals", []))
+            print(f"  [memory] prior run loaded ({n_prior} signals for trajectory diff)")
+    except Exception:
+        pass
+
+    return {"past_findings": findings, "_prior_run": prior_run}
 
 
 async def save_memory(state: DrugSafetyState) -> dict:
@@ -540,19 +612,21 @@ async def investigate(state: DrugSafetyState) -> dict:
         pass
     comparators = comparators[:3]  # top 3 to keep the prompt concise
 
-    # Include ML Memory context — prior run findings
-    memory_context = ""
-    past = state.get("past_findings", [])
-    if past and "error" not in past[0]:
-        prior = past[0].get("response", "")
-        if prior:
-            memory_context = f"\nPRIOR RUN FINDINGS (from ML Memory):\n{prior[:400]}\n"
+    # Build memory context — prefer structured PRR trajectory from prior run,
+    # fall back to truncated text from ML Memory if no structured data available.
+    prior_run = state.get("_prior_run")
+    memory_context = build_memory_context(state["prr_signals"], prior_run)
+    if not memory_context:
+        past = state.get("past_findings", [])
+        if past and "error" not in past[0]:
+            prose = past[0].get("response", "")
+            if prose:
+                memory_context = f"\nPRIOR RUN FINDINGS:\n{prose[:400]}\n"
 
     # Python loop — one agent invocation per signal.
     # Without this, thinking models (Qwen3.5, Gemma4-31B) pre-reason all signals in
     # thinking tokens and only call tools for the first one, extrapolating the rest.
     # One call per signal guarantees tool calls happen for every reaction.
-    # Use REACTION_PLACEHOLDER / DRUG_PLACEHOLDER to avoid f-string / .format conflicts.
     persistent_tag = "| PERSISTENT" if memory_context else ""
 
     print(f"  [invest] investigating {len(targets)} signals sequentially: "
@@ -560,6 +634,7 @@ async def investigate(state: DrugSafetyState) -> dict:
 
     all_findings = []
     total_tool_calls = 0
+    classifications: list[dict] = []   # structured per-reaction parse results
 
     for signal in targets:
         rxn       = signal["reaction"]
@@ -623,6 +698,10 @@ async def investigate(state: DrugSafetyState) -> dict:
 
         all_findings.append(f"**{rxn}**\n{text}")
 
+        # Parse structured output immediately while section text is in scope
+        parsed = _parse_classification(rxn, text)
+        classifications.append(parsed)
+
     investigation_text = "\n\n".join(all_findings)
     tool_calls = total_tool_calls
     print(f"  [invest] {tool_calls} total tool calls → classification done")
@@ -643,21 +722,17 @@ async def investigate(state: DrugSafetyState) -> dict:
         print(f"  [invest] WARNING: model returned empty — using fallback text")
 
     # ── Phase 2: Free-form deep investigation ───────────────────────────────
-    # Only runs when Phase 1 finds something unusual: DRUG_SPECIFIC or ratio > 7
-    # Model decides which tools to call and in what order — full autonomy.
+    # Fires when Phase 1 finds DRUG_SPECIFIC OR ratio > 5 (same cutoff as the
+    # Phase-1 prompt's own DRUG_SPECIFIC threshold — avoids the old dead band
+    # where ratio 5–7 was DRUG_SPECIFIC by label but skipped Phase 2).
+    # Uses the structured _parse_classification results, not fragile text scraping.
     deep_text = ""
     deep_calls = 0
 
-    interesting = (
-        "DRUG_SPECIFIC" in investigation_text
-        or any(
-            f"{drug} is" in line and any(
-                float(x) > 7.0
-                for x in line.split("x")[0].split("is")[-1].strip().split()
-                if x.replace(".","").isdigit()
-            )
-            for line in investigation_text.split("\n")
-        )
+    interesting = any(
+        c["effect"] == "DRUG_SPECIFIC"
+        or (c["ratio"] is not None and c["ratio"] > 5.0)
+        for c in classifications
     )
 
     if interesting:
@@ -666,13 +741,16 @@ async def investigate(state: DrugSafetyState) -> dict:
             f"You found these signals for {drug}:\n\n"
             f"{investigation_text}\n\n"
             f"At least one is DRUG_SPECIFIC or has a high ratio. "
-            f"Use any tools in any order to dig deeper. You can:\n"
-            f"- Call list_opensearch_tools to discover available OpenSearch tools\n"
-            f"- Use call_opensearch_tool with analyze_reaction_distribution to compare "
-            f"recent vs historical periods\n"
+            f"Use any tools in any order to dig deeper. Suggested approaches:\n"
+            f"- Call compare_time_periods(drug, reaction, recent_start, recent_end, "
+            f"baseline_start, baseline_end) to test whether the signal is EMERGING "
+            f"(absent in baseline) or GROWING. Use ISO dates, e.g. 2024-01-01.\n"
+            f"- Call call_opensearch_tool('list_anomaly_detectors', '{{}}') then "
+            f"call_opensearch_tool('get_anomaly_results', '{{\"anomalyGradeThreshold\": 0.7}}') "
+            f"to confirm WHICH time window the class-ratio anomaly peaked.\n"
             f"- Call get_prr with alternative drug name variants\n"
-            f"- Call check_class_effect with different comparators\n"
-            f"- Check related reactions that might explain the pattern\n\n"
+            f"- Call check_class_effect with different comparator drugs\n"
+            f"- Search related reactions that might explain the pattern\n\n"
             f"Run up to 5 tool calls. Summarise what you find in 2-3 sentences."
         )
         deep_result = await _deep_investigator_agent.ainvoke(
@@ -698,7 +776,67 @@ async def investigate(state: DrugSafetyState) -> dict:
         "tool_calls_made":      tool_calls,
         "findings":             investigation_text,
     }]
-    return {"investigation": investigation}
+    return {"investigation": investigation, "classifications": classifications}
+
+
+async def classify_signals(state: DrugSafetyState) -> dict:
+    """
+    Cross-run signal lifecycle classification.
+
+    Diffs current PRR signals against the prior run to assign:
+      NEW        — reaction not seen in any prior run
+      VALIDATED  — seen in prior run, PRR still elevated (≥50% of prior value)
+      DISMISSED  — was flagged before, PRR has collapsed (<50% of prior value)
+
+    Persists the structured run document for the next run to diff against.
+    Runs whether or not investigation fired — tracks all PRR signals, not just
+    the investigated ones.
+    """
+    prior_run = state.get("_prior_run")
+    prior_map = {s["reaction"]: s for s in (prior_run.get("signals", []) if prior_run else [])}
+    cls_map   = {c["reaction"]: c for c in state.get("classifications", [])}
+    label_text = state.get("label_text", "")
+    llt_expansions = state.get("llt_expansions", {})
+
+    signal_status: list[dict] = []
+    for s in state["prr_signals"]:
+        rxn   = s["reaction"]
+        p     = prior_map.get(rxn)
+        c     = cls_map.get(rxn, {})
+        p_prr = (p.get("prr") or 0) if p else 0
+        c_prr = s["prr"]
+
+        if p is None:
+            status = "NEW"
+        elif c_prr >= p_prr * 0.5:
+            status = "VALIDATED"
+        else:
+            status = "DISMISSED"
+
+        signal_status.append({
+            "reaction":   rxn,
+            "prr":        c_prr,
+            "prr_lower":  s.get("prr_lower"),
+            "drug_count": s["drug_count"],
+            "effect":     c.get("effect"),
+            "trend":      c.get("trend"),
+            "labeled":    _is_labeled(rxn, label_text, llt_expansions),
+            "status":     status,
+            "prr_prior":  p_prr if p else None,
+        })
+
+    # Persist structured run doc (non-blocking)
+    try:
+        await save_run_signals(state["drug_name"], signal_status)
+    except Exception:
+        pass
+
+    new_count  = sum(1 for s in signal_status if s["status"] == "NEW")
+    val_count  = sum(1 for s in signal_status if s["status"] == "VALIDATED")
+    dism_count = sum(1 for s in signal_status if s["status"] == "DISMISSED")
+    print(f"  [status] NEW={new_count} VALIDATED={val_count} DISMISSED={dism_count}")
+
+    return {"signal_status": signal_status}
 
 
 # ---------------------------------------------------------------------------
@@ -726,10 +864,20 @@ async def write_report(state: DrugSafetyState) -> dict:
     drug           = state["drug_name"].upper()
 
     # ── Deterministic header (Python, not LLM) ──────────────────────────────
+    # Include cross-run signal status summary if available
+    status_map = {s["reaction"]: s["status"] for s in state.get("signal_status", [])}
+    new_count   = sum(1 for v in status_map.values() if v == "NEW")
+    val_count   = sum(1 for v in status_map.values() if v == "VALIDATED")
+    dism_count  = sum(1 for v in status_map.values() if v == "DISMISSED")
+    status_note = ""
+    if status_map:
+        status_note = (f"  |  **Signals**: {new_count} NEW · "
+                       f"{val_count} VALIDATED · {dism_count} DISMISSED")
+
     header = (
         f"## Drug Safety Briefing: {drug}\n"
         f"**FAERS reports analysed**: {state['drug_total']:,}  |  "
-        f"**Index**: {state['faers_total']:,}\n"
+        f"**Index**: {state['faers_total']:,}{status_note}\n"
     )
 
     # ── Parse investigation classifications for PRR table column ────────────
@@ -796,6 +944,9 @@ async def write_report(state: DrugSafetyState) -> dict:
         ic025_col  = str(s.get("ic025","—"))
         ic_flag    = "✓" if s.get("ic_signal") else ("~" if s.get("ic") else "—")
         inv_col    = inv_tags.get(rxn, "—")
+        # Cross-run status badge: NEW / VALIDATED / DISMISSED
+        run_status = status_map.get(rxn, "")
+        status_badge = {"NEW": "🆕", "VALIDATED": "✅", "DISMISSED": "📉"}.get(run_status, "")
         # Stratified PRR (MH) — only shown when stratify_by was requested
         mh_col = ""
         if s.get("prr_strat_field"):
@@ -805,7 +956,7 @@ async def write_report(state: DrugSafetyState) -> dict:
             mh_val = str(s.get("prr_mh", "—"))
             mh_col = f" | {mh_val} ({mh_ci})"
         prr_rows.append(
-            f"| {rxn} | {s['prr']} ({prr_ci_col}) | {ror_col} ({ror_ci_col}) | "
+            f"| {rxn} {status_badge} | {s['prr']} ({prr_ci_col}) | {ror_col} ({ror_ci_col}) | "
             f"{ebgm_col} / {eb05_col} {eb05_flag} | "
             f"{ic_col} / {ic025_col} {ic_flag} | "
             f"{chi2_badge}{robust_col}{fdr_col} | "
@@ -964,21 +1115,22 @@ def should_investigate(state: DrugSafetyState) -> str:
 def build_pipeline() -> StateGraph:
     graph = StateGraph(DrugSafetyState)
 
-    graph.add_node("resolve_names",    resolve_names)
-    graph.add_node("load_memory",      load_memory)        # ML Memory: load prior findings
-    graph.add_node("calculate_prr",    calculate_prr_signals)
+    graph.add_node("resolve_names",     resolve_names)
+    graph.add_node("load_memory",       load_memory)          # ML Memory: load prior findings + structured run
+    graph.add_node("calculate_prr",     calculate_prr_signals)
     graph.add_node("anomaly_detection", run_anomaly_detection)
-    graph.add_node("fetch_label",      fetch_label)
-    graph.add_node("search_lit",       search_lit)
-    graph.add_node("investigate",      investigate)
-    graph.add_node("write_report",     write_report)
-    graph.add_node("save_memory",      save_memory)        # ML Memory: persist findings
+    graph.add_node("fetch_label",       fetch_label)
+    graph.add_node("search_lit",        search_lit)
+    graph.add_node("investigate",       investigate)
+    graph.add_node("classify_signals",  classify_signals)     # cross-run NEW/VALIDATED/DISMISSED
+    graph.add_node("write_report",      write_report)
+    graph.add_node("save_memory",       save_memory)          # ML Memory: persist findings
 
     graph.set_entry_point("resolve_names")
-    graph.add_edge("resolve_names",     "load_memory")      # load prior ML Memory
+    graph.add_edge("resolve_names",     "load_memory")
     graph.add_edge("load_memory",       "calculate_prr")
     graph.add_edge("calculate_prr",     "anomaly_detection")
-    graph.add_edge("anomaly_detection",  "fetch_label")
+    graph.add_edge("anomaly_detection", "fetch_label")
 
     # After label: search literature if strong unlabeled signals exist
     graph.add_conditional_edges(
@@ -991,12 +1143,14 @@ def build_pipeline() -> StateGraph:
     graph.add_conditional_edges(
         "search_lit",
         should_investigate,
-        {"investigate": "investigate", "write_report": "write_report"},
+        {"investigate": "investigate", "write_report": "classify_signals"},
     )
 
-    graph.add_edge("investigate",  "write_report")
-    graph.add_edge("write_report", "save_memory")           # persist to ML Memory
-    graph.add_edge("save_memory",  END)
+    # classify_signals always runs (whether or not investigation fired)
+    graph.add_edge("investigate",       "classify_signals")
+    graph.add_edge("classify_signals",  "write_report")
+    graph.add_edge("write_report",      "save_memory")        # persist to ML Memory
+    graph.add_edge("save_memory",       END)
 
     return graph.compile()
 

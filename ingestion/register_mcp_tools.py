@@ -67,22 +67,11 @@ TOOLS = [
         "attributes": {},
     },
 
-    # ── New: Narrative pattern analysis ──────────────────────────────────
-    {
-        "type": "LogPatternAnalysisTool",
-        "name": "analyze_narrative_patterns",
-        "description": (
-            "Finds anomalous patterns in FAERS adverse event narratives. "
-            "Compares narrative text patterns between two time periods — "
-            "identifies new symptom descriptions or unusual report clusters. "
-            "Required: logFieldName='narrative', selectionTimeRangeStart/End. "
-            "Optional: baseTimeRangeStart/End for comparison."
-        ),
-        "attributes": {
-            "index":     "faers_reports",
-            "timeField": "receivedate",
-        },
-    },
+    # Note: LogPatternAnalysisTool (analyze_narrative_patterns) removed.
+    # The `narrative` field is empty in FAERS ingestion — the openFDA API
+    # and ZIP ingestion paths do not include free-text narratives. Registering
+    # the tool would burn a Phase-2 tool-call slot on a guaranteed-empty result.
+    # Re-register if narrative ingestion is added in the future.
 ]
 
 

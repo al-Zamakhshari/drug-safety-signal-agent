@@ -1,21 +1,27 @@
 """
 Signal registry backed by OpenSearch ML Memory (OS 3.6.0+).
 
-Uses the native /_plugins/_ml/memory API — no extra services needed.
-One memory container per drug stores investigation findings across runs,
-completing the roadmap item:  [ ] Signal registry (NEW/VALIDATED/DISMISSED)
+Two complementary stores:
+
+1. ML Memory (`/_plugins/_ml/memory`) — human-readable text trail.
+   One container per drug; each run appends one message (free-text).
+   Used for the investigator's contextual "PRIOR RUN FINDINGS" note.
+
+2. Structured run index (`agent-signal-runs`) — machine-readable per-run state.
+   One document per (drug, run). Enables:
+     - Cross-run PRR delta ("PANCREATITIS was PRR=8.2, now PRR=9.1 → GROWING")
+     - NEW / VALIDATED / DISMISSED signal lifecycle
+     - Enriched memory_context for the Phase-1 investigator prompt
 
 Architecture:
   One memory container per drug (created on first run, reused after).
-  Each pipeline run appends its findings as messages.
-  Next run queries memory to inform investigation priorities.
-
-Memory container IDs are stored in the `agent-memory-index` OS index
-so they persist across process restarts.
+  Container IDs persisted in `agent-signal-memory-index` (survives restarts).
+  Structured run docs in `agent-signal-runs` (separate index).
 """
 
 import os
 import json
+from datetime import datetime, timezone
 from typing import Any
 import httpx
 from dotenv import load_dotenv
@@ -30,10 +36,16 @@ HDR   = {"Content-Type": "application/json"}
 
 # OS index that maps drug → memory_id (persists across restarts)
 _REGISTRY_INDEX = "agent-signal-memory-index"
+# OS index for structured per-run signal state
+_RUNS_INDEX = "agent-signal-runs"
 
 # In-process cache: drug → memory_id
 _memory_cache: dict[str, str] = {}
 
+
+# ---------------------------------------------------------------------------
+# HTTP helpers
+# ---------------------------------------------------------------------------
 
 async def _os_post(path: str, body: dict) -> dict:
     async with httpx.AsyncClient(verify=False, timeout=15) as client:
@@ -47,33 +59,35 @@ async def _os_get(path: str) -> dict:
         return r.json()
 
 
-async def _ensure_registry_index():
-    """Create the OS index that stores drug→memory_id mapping."""
+async def _os_put_index(index: str, mapping: dict) -> None:
+    """Create an index if it doesn't exist (ignores 400 = already exists)."""
     async with httpx.AsyncClient(verify=False, timeout=10) as client:
-        r = await client.put(
-            f"{BASE}/{_REGISTRY_INDEX}",
-            auth=AUTH, headers=HDR,
-            json={"mappings": {"properties": {
-                "drug":      {"type": "keyword"},
-                "memory_id": {"type": "keyword"},
-            }}, "settings": {"number_of_shards": 1, "number_of_replicas": 0}},
-        )
-    # 400 = already exists, fine
-    return r.status_code in (200, 201, 400)
+        await client.put(f"{BASE}/{index}", auth=AUTH, headers=HDR, json=mapping)
+
+
+# ---------------------------------------------------------------------------
+# ML Memory (text trail — store 1)
+# ---------------------------------------------------------------------------
+
+async def _ensure_registry_index():
+    await _os_put_index(_REGISTRY_INDEX, {
+        "mappings": {"properties": {
+            "drug":      {"type": "keyword"},
+            "memory_id": {"type": "keyword"},
+        }},
+        "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    })
 
 
 async def get_or_create_memory(drug: str) -> str:
     """
-    Return the ML Memory container ID for a drug, creating it if needed.
-    IDs are persisted in OpenSearch so they survive process restarts.
+    Return the ML Memory container ID for a drug, creating if needed.
+    IDs persisted in OpenSearch so they survive process restarts.
     """
     drug_upper = drug.upper()
-
-    # 1. In-process cache
     if drug_upper in _memory_cache:
         return _memory_cache[drug_upper]
 
-    # 2. Check persisted index
     await _ensure_registry_index()
     async with httpx.AsyncClient(verify=False, timeout=10) as client:
         r = await client.post(
@@ -87,16 +101,11 @@ async def get_or_create_memory(drug: str) -> str:
             _memory_cache[drug_upper] = mid
             return mid
 
-    # 3. Create new memory container
-    resp = await _os_post(
-        "/_plugins/_ml/memory",
-        {"name": f"drug_safety_{drug_upper}"}
-    )
+    resp = await _os_post("/_plugins/_ml/memory", {"name": f"drug_safety_{drug_upper}"})
     mid = resp.get("memory_id")
     if not mid:
         raise RuntimeError(f"Failed to create ML Memory container: {resp}")
 
-    # Persist the mapping
     async with httpx.AsyncClient(verify=False, timeout=10) as client:
         await client.post(
             f"{BASE}/{_REGISTRY_INDEX}/_doc",
@@ -114,50 +123,146 @@ async def save_finding(
     risk: str = "MEDIUM",
 ) -> dict[str, Any]:
     """
-    Persist this run's findings to ML Memory.
-
-    Each run is stored as one message in the memory container.
-    The input field records detected signals; the response field
-    records the LLM investigation classification.
+    Persist this run's text findings to ML Memory (human-readable trail).
+    Separate from the structured run store — both are maintained.
     """
     mid = await get_or_create_memory(drug)
-
-    # Compact signal summary for the input field
     top_signals = [
         f"{s['reaction']} PRR={s['prr']} n={s['drug_count']} sig={'✓' if s.get('significant') else '~'}"
         for s in signals[:10]
     ]
     input_text = f"DRUG: {drug.upper()} | RISK: {risk}\nSIGNALS: {'; '.join(top_signals)}"
-
     resp = await _os_post(
         f"/_plugins/_ml/memory/{mid}/messages",
-        {
-            "input":    input_text,
-            "response": investigation or "No investigation performed",
-        }
+        {"input": input_text, "response": investigation or "No investigation performed"},
     )
     return {"memory_id": mid, "message_id": resp.get("message_id"), "drug": drug}
 
 
 async def search_findings(drug: str, top_n: int = 5) -> list[dict[str, Any]]:
-    """
-    Retrieve past investigation findings for a drug from ML Memory.
-    Returns the most recent `top_n` messages.
-    """
+    """Retrieve past text findings from ML Memory (most recent first)."""
     try:
         mid = await get_or_create_memory(drug)
-        # Correct endpoint: GET /messages (not POST /_search)
         resp = await _os_get(f"/_plugins/_ml/memory/{mid}/messages")
         raw_messages = resp.get("messages", [])
-        # Sort by create_time descending, take top_n
         raw_messages.sort(key=lambda m: m.get("create_time", ""), reverse=True)
-        messages = []
-        for msg in raw_messages[:top_n]:
-            messages.append({
-                "input":      msg.get("input", ""),
-                "response":   msg.get("response", ""),
-                "created_at": msg.get("create_time", ""),
-            })
-        return messages
+        return [
+            {"input": msg.get("input", ""), "response": msg.get("response", ""),
+             "created_at": msg.get("create_time", "")}
+            for msg in raw_messages[:top_n]
+        ]
     except Exception as e:
         return [{"error": str(e)}]
+
+
+# ---------------------------------------------------------------------------
+# Structured run store (machine-readable — store 2)
+# ---------------------------------------------------------------------------
+
+_RUNS_MAPPING = {
+    "mappings": {"properties": {
+        "drug":     {"type": "keyword"},
+        "run_ts":   {"type": "date"},
+        "signals":  {"type": "nested", "properties": {
+            "reaction":   {"type": "keyword"},
+            "prr":        {"type": "float"},
+            "prr_lower":  {"type": "float"},
+            "drug_count": {"type": "integer"},
+            "effect":     {"type": "keyword"},   # CLASS_EFFECT | DRUG_SPECIFIC | None
+            "trend":      {"type": "keyword"},   # GROWING | STABLE | EMERGING | None
+            "labeled":    {"type": "boolean"},
+            "status":     {"type": "keyword"},   # NEW | VALIDATED | DISMISSED
+        }},
+    }},
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+}
+
+
+async def save_run_signals(drug: str, signals: list[dict]) -> None:
+    """
+    Persist one structured run document per drug.
+    Each signal carries: reaction, prr, prr_lower, drug_count,
+    effect (from Phase-1 classifier), trend, labeled, status (NEW/VALIDATED/DISMISSED).
+    """
+    await _os_put_index(_RUNS_INDEX, _RUNS_MAPPING)
+    doc = {
+        "drug":    drug.upper(),
+        "run_ts":  datetime.now(timezone.utc).isoformat(),
+        "signals": signals,
+    }
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=15) as client:
+            await client.post(
+                f"{BASE}/{_RUNS_INDEX}/_doc",
+                auth=AUTH, headers=HDR, json=doc,
+            )
+    except Exception:
+        pass   # structured store is supplemental — never block the pipeline
+
+
+async def load_last_run(drug: str) -> dict | None:
+    """
+    Fetch the most recent structured run document for a drug.
+    Returns None if no prior run exists.
+    """
+    try:
+        await _os_put_index(_RUNS_INDEX, _RUNS_MAPPING)
+        async with httpx.AsyncClient(verify=False, timeout=10) as client:
+            r = await client.post(
+                f"{BASE}/{_RUNS_INDEX}/_search",
+                auth=AUTH, headers=HDR,
+                json={
+                    "query": {"term": {"drug": drug.upper()}},
+                    "sort":  [{"run_ts": {"order": "desc"}}],
+                    "size":  1,
+                },
+            )
+            hits = r.json().get("hits", {}).get("hits", [])
+            return hits[0]["_source"] if hits else None
+    except Exception:
+        return None
+
+
+def build_memory_context(current_signals: list[dict], prior_run: dict | None) -> str:
+    """
+    Build a structured per-reaction PRR delta string for the Phase-1 investigator
+    prompt — replaces the old truncated prose note.
+
+    Example output:
+      PANCREATITIS: DRUG_SPECIFIC PRR=8.2→9.1 (+11%) | PERSISTENT+GROWING
+      BLOOD_GLUCOSE_INCR: DRUG_SPECIFIC PRR=6.0 last run | now PRR=2.1 → RESOLVED
+      NAUSEA: NEW (first time seen)
+    """
+    if not prior_run:
+        return ""
+
+    prior_map = {s["reaction"]: s for s in prior_run.get("signals", [])}
+    current_map = {s["reaction"]: s for s in current_signals}
+    lines = []
+
+    for rxn, cur in current_map.items():
+        prior = prior_map.get(rxn)
+        if prior is None:
+            lines.append(f"  {rxn}: NEW (not seen in prior run)")
+        else:
+            p_prr = prior.get("prr") or 0
+            c_prr = cur.get("prr") or 0
+            delta_pct = int((c_prr - p_prr) / p_prr * 100) if p_prr else 0
+            direction = f"+{delta_pct}%" if delta_pct > 0 else f"{delta_pct}%"
+            tags = []
+            if prior.get("effect"):
+                tags.append(prior["effect"])
+            if prior.get("status") == "VALIDATED":
+                tags.append("PERSISTENT")
+            tag_str = " ".join(tags)
+            lines.append(
+                f"  {rxn}: {tag_str} PRR={p_prr:.1f}→{c_prr:.1f} ({direction})"
+            )
+
+    for rxn, prior in prior_map.items():
+        if rxn not in current_map and prior.get("status") == "VALIDATED":
+            lines.append(f"  {rxn}: PRR={prior.get('prr'):.1f} last run → RESOLVED (gone)")
+
+    if not lines:
+        return ""
+    return "PRIOR RUN SIGNAL TRAJECTORY:\n" + "\n".join(lines[:10]) + "\n"
