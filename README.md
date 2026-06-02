@@ -68,21 +68,21 @@ flowchart TD
     FL["📋 fetch_label\nopenFDA label text\nMedDRA LLT synonyms cached"]
     FL --> R1
 
-    R1{robust signal\nAND unlabeled\nAND PRR ≥ 3?}
+    R1{"robust signal\nAND unlabeled\nAND PRR >= 3?"}
     R1 -->|Yes| SL
     R1 -->|No| R2
 
     SL["📚 search_lit\nPubMed API\ntop 3 unlabeled signals"]
     SL --> R2
 
-    R2{PRR ≥ 5\nAND robust CI\nAND FDR q < 0.05\nAND unlabeled?}
+    R2{"PRR >= 5\nAND robust CI\nAND FDR q < 0.05\nAND unlabeled?"}
     R2 -->|Yes| INV
     R2 -->|No| CS
 
     INV["🔬 investigate\nQwen3.5-9B  thinking=ON\nPhase 1: grounded tool calls\nPhase 2: free-form exploration"]
     INV --> CS
 
-    CS["🔁 classify_signals\nCross-run lifecycle diff\nNEW · VALIDATED · DISMISSED\nCI-overlap test vs prior run\nagent-signal-runs index"]
+    CS["🔁 classify_signals\nCross-run lifecycle diff\nNEW - VALIDATED - DISMISSED\nCI-overlap test vs prior run\nagent-signal-runs index"]
     CS --> WR
 
     WR["✍️ write_report\nQwen3.5-9B  thinking=OFF\nnarrative prose only\nnumbers never re-typed by model"]
@@ -114,20 +114,20 @@ flowchart TD
 flowchart TB
     subgraph INFRA["🐳 Infrastructure  (Docker Compose)"]
         OS[("OpenSearch 3.6.0\nfaers_reports — 18M docs (2004–2026)\nfaers_ml_rates — 17K class-ratio docs\nML Memory + agent-signal-runs — lifecycle registry")]
-        QW["Qwen3.5-9B Q4_K_XL\nDocker Model Runner\n5.6 GB  ·  Apple Metal / CUDA"]
-        PX["Arize Phoenix\nOTLP traces  ·  port 4317"]
+        QW["Qwen3.5-9B Q4_K_XL\nDocker Model Runner\n5.6 GB - Apple Metal / CUDA"]
+        PX["Arize Phoenix\nOTLP traces - port 4317"]
     end
 
     subgraph STATS["📐 Statistics Layer  (Python — deterministic)"]
         P1["PRR + ROR\nCorrect 2×2, non-exposed denominator\nper-reaction baseline via filters agg"]
         P2["95% CI + BH-FDR\nEvans 2001 log-normal\nBenjamini-Hochberg q across all m tested"]
-        P3["EBGM / EB05\nGamma-Poisson Shrinker\nDuMouchel 1999  ·  FDA MGPS standard"]
+        P3["EBGM / EB05\nGamma-Poisson Shrinker\nDuMouchel 1999 - FDA MGPS standard"]
         P4["Mantel–Haenszel\nQuarterly strata\nRobins–Breslow–Greenland variance"]
         P5["Label matching\nMedDRA LLT + negation + direction\n3-state: Yes / Possible / No ⚠️"]
     end
 
     subgraph LLM_LAYER["🤖 LLM Layer  (Qwen3.5-9B — advisory)"]
-        L1["Investigation  thinking=ON\nPhase 1: grounded function calls\nPhase 2: free-form exploration\nTools: get_prr · check_class_effect\nget_signal_trend · DataDistributionTool"]
+        L1["Investigation  thinking=ON\nPhase 1: grounded function calls\nPhase 2: free-form exploration\nTools: get_prr, check_class_effect\nget_signal_trend, compare_time_periods"]
         L2["Report writing  thinking=OFF\nNarrative prose only\nNo numbers re-typed\n_DISCLAIMER always appended"]
     end
 
@@ -152,7 +152,7 @@ Every candidate signal climbs five rungs before triggering investigation. Each r
 flowchart LR
     R0["FAERS reports\n(raw counts)"]
 
-    R0 -->|n ≥ 3\neliminate\nsingle-event noise| R1
+    R0 -->|n >= 3\neliminate\nsingle-event noise| R1
 
     R1["PRR / ROR\npoint estimate\n2×2 table"]
 
@@ -164,17 +164,17 @@ flowchart LR
 
     R3["χ² significance\nannotation ✓/~\nnot a gate — surfaced\nfor human review"]
 
-    R3 -->|Benjamini-Hochberg\nm = ALL reactions tested\nnot just PRR≥2| R4
+    R3 -->|Benjamini-Hochberg\nm = ALL reactions tested\nnot just PRR>=2| R4
 
     R4["BH q-value\n< 0.05 gate\nfamily-wise FDR\nacross ~50 reactions"]
 
     R4 -->|DuMouchel 1999\nGPS mixture prior\nfit across all drug reactions| R5
 
-    R5["EBGM / EB05\nEB05 ≥ 2 = FDA flag\nshrinks PRR=15 at n=3\ndown to EB05~1.1"]
+    R5["EBGM / EB05\nEB05 >= 2 = FDA flag\nshrinks PRR=15 at n=3\ndown to EB05~1.1"]
 
     R5 -->|All five passed| GATE{{"Investigation\ngate"}}
 
-    GATE -->|unlabeled\nPRR ≥ 5| INV["🔬 LLM investigates"]
+    GATE -->|unlabeled\nPRR >= 5| INV["🔬 LLM investigates"]
     GATE -->|all signals| TABLE["📊 Report table"]
 
     style GATE fill:#dcfce7,stroke:#16a34a
@@ -188,35 +188,35 @@ For each strong unlabeled signal, Qwen3.5-9B runs two sequential phases:
 
 ```mermaid
 flowchart TD
-    SIG["Strong unlabeled signal\nPRR ≥ 5  ·  robust CI  ·  FDR q < 0.05"]
+    SIG["Strong unlabeled signal\nPRR >= 5, robust CI, FDR q < 0.05"]
     SIG --> LOOP
 
-    subgraph LOOP["Per-signal Python loop\none LLM call per reaction\nguarantees tool execution"]
+    subgraph LOOP["Per-signal Python loop - one LLM call per reaction - guarantees tool execution"]
         direction TB
 
-        subgraph P1["Phase 1 — Grounded  (always runs)"]
-            T1["① get_prr\n'Write: get_prr returned: paste exact JSON'\nprevents training-knowledge substitution"]
-            T2["② check_class_effect\ncompare PRR vs 3 comparators\nidentify LOWEST comparator value"]
-            T3["③ get_signal_trend\nquarterly timeline"]
+        subgraph P1["Phase 1: Grounded - always runs"]
+            T1["Step 1: get_prr\nWrite exact JSON result\nprevents knowledge substitution"]
+            T2["Step 2: check_class_effect\ncompare PRR vs 3 comparators\nidentify LOWEST comparator value"]
+            T3["Step 3: get_signal_trend\nquarterly timeline"]
             T1 --> T2 --> T3
-            T3 --> C1{"drug PRR ÷\nLOWEST comparator\n> 5?"}
+            T3 --> C1{"drug PRR / lowest\ncomparator > 5?"}
             C1 -->|Yes| DS["DRUG_SPECIFIC"]
-            C1 -->|No|  CE["CLASS_EFFECT"]
+            C1 -->|No| CE["CLASS_EFFECT"]
         end
 
         DS & CE --> P2CHECK
 
         P2CHECK{"DRUG_SPECIFIC\nor ratio > 5?"}
 
-        subgraph P2["Phase 2 — Free-form  (conditional)"]
-            FT["Model chooses tools freely\ncompare_time_periods — EMERGING/GROWING test\nAD tools — which time window spiked\nget_prr — alternative name variants\ncheck_class_effect — other drug classes"]
+        subgraph P2["Phase 2: Free-form - conditional"]
+            FT["Model chooses tools freely\ncompare_time_periods: EMERGING/GROWING\nAD tools: which time window spiked\nget_prr: alternative name variants\ncheck_class_effect: other drug classes"]
         end
 
         P2CHECK -->|Yes| P2
         P2CHECK -->|No| OUT
         P2 --> OUT
 
-        OUT["CLASSIFICATION  |  TREND  |  INSIGHT\nall grounded in tool-call results"]
+        OUT["CLASSIFICATION / TREND / INSIGHT\ngrounded in tool-call results"]
     end
 ```
 
