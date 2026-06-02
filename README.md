@@ -10,6 +10,7 @@ uv sync
 docker compose up -d                    # pulls Qwen3.5-9B ~5.6GB on first run
 ./ingestion/download_faers.sh           # downloads FAERS 2018–2026 to ~/faers_data/
 uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
+uv run python -m ingestion.discover_comparators --drug <drug>  # for each drug you want within-class analysis
 uv run python -m ingestion.compute_class_ratio
 uv run python -m ingestion.register_mcp_tools
 uv run python -m app.server            # → http://localhost:8080
@@ -31,16 +32,16 @@ Detects drug safety signals from FDA FAERS adverse event reports using a fully l
 | Signal memory | Cross-run persistence | OpenSearch ML Memory (3.6+) |
 | Web interface | Real-time streaming briefing | FastAPI + SSE |
 
-**Example output — semaglutide, 82,699 reports, 18M baseline (2004–2026):**
+**Example output — semaglutide, 82,700 reports, 18M baseline (2004–2026):**
 
 ```
 ### PRR + ROR + EBGM + BCPNN Signals (EMA/FDA/WHO standards)
-| Reaction                  | PRR (95% CI)      | ROR (95% CI)      | EBGM / EB05 | IC / IC025 | χ²/CI/FDR | n     | Label? |
-|---------------------------|-------------------|-------------------|-------------|------------|-----------|-------|--------|
-| IMPAIRED GASTRIC EMPTYING | 82.72 (79.8–85.7) | 85.86 (82.1–89.8) | 78.4 / 72.1 ✓| 6.3 / 6.2 ✓| ✓✓✓  | 3,057 | Yes    |
-| GLYCOSYLATED HB INCREASED | 11.54 (10.9–12.2) | 11.68 (11.0–12.4) | 11.2 / 10.8 ✓| 3.4 / 3.3 ✓| ✓✓✓  | 1,111 | No ⚠️  |
-| PANCREATITIS              | 10.38 (9.8–11.0)  | 10.55 (9.9–11.2)  | 9.9 / 9.4 ✓  | 3.3 / 3.2 ✓| ✓✓✓  | 1,504 | Yes    |
-| BLOOD GLUCOSE DECREASED   | 9.97 (9.4–10.6)   | 10.12 (9.5–10.8)  | 9.5 / 8.9 ✓  | 3.2 / 3.1 ✓| ✓✓✓  | 1,311 | No ⚠️  |
+| Reaction                        | PRR (95% CI)       | ROR (95% CI)       | EBGM / EB05   | IC / IC025  | n     | Label? |
+|---------------------------------|--------------------|--------------------|---------------|-------------|-------|--------|
+| IMPAIRED GASTRIC EMPTYING       | 84.94 (81.5–88.5)  | 88.16 (84.5–91.9)  | 57.0 / 55.2 ✓ | 5.8 / 5.8 ✓ | 3,057 | Yes    |
+| GLYCOSYLATED HB INCREASED       | 11.80 (11.1–12.5)  | 11.95 (11.2–12.7)  | 11.2 / 10.7 ✓ | 3.5 / 3.4 ✓ | 1,111 | No ⚠️  |
+| PANCREATITIS                    | 6.81  (6.47–7.16)  | 6.91  (6.56–7.28)  | 6.6  / 6.3  ✓ | 2.7 / 2.6 ✓ | 1,504 | Yes    |
+| BLOOD GLUCOSE DECREASED         | 7.25  (6.87–7.66)  | 7.36  (6.96–7.77)  | 7.0  / 6.7  ✓ | 2.8 / 2.7 ✓ | 1,311 | No ⚠️  |
 
 Risk: HIGH  |  Action: ESCALATE
 ```
@@ -323,6 +324,8 @@ Everything runs locally via Docker. Zero external dependencies.
 - **16GB RAM** recommended (OpenSearch 1.5GB + Qwen3.5-9B ~5.6GB)
 - **~10GB disk** for full FAERS 2018–2026 dataset
 
+**Optional:** Set `GOOGLE_API_KEY` (free at [aistudio.google.com](https://aistudio.google.com)) to upgrade the investigator to Gemma4-31B via Google AI Studio. Set `INVESTIGATOR_MODEL` to override the local model path.
+
 ---
 
 ## Quick Start
@@ -349,7 +352,9 @@ uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 
 # 4. Compute within-class disproportionality (one-time)
-uv run python -m ingestion.compute_class_ratio
+# For new drugs: first auto-discover comparators via RxClass ATC, then build index
+uv run python -m ingestion.discover_comparators --drug <your-drug>   # optional: auto-populates config/comparators.yaml
+uv run python -m ingestion.compute_class_ratio                        # builds faers_ml_rates for all drugs in comparators.yaml
 
 # 5. Register OpenSearch MCP tools (one-time, enables free-form investigation)
 uv run python -m ingestion.register_mcp_tools
@@ -380,15 +385,17 @@ SE_ROR = √(1/a + 1/b + 1/c + 1/d)
 95% CI = exp(ln(estimate) ± 1.96 · SE)
 ```
 
-Signal criteria (all five must pass for investigation gate):
+Signal criteria applied in sequence:
 
 | Criterion | Threshold | Controls |
 |-----------|-----------|---------|
-| Count | n ≥ 3 | Single-event noise |
+| Count | n ≥ 3 | Single-event noise (PRR signal table) |
 | PRR | ≥ 2.0 | Effect size (EMA standard) |
 | CI lower | > 1.0 | Small-n instability — PRR=15 at n=4 fails |
 | BH q-value | < 0.05 | Family-wise FDR (m = all reactions tested, not just PRR≥2) |
 | EBGM EB05 | ≥ 2.0 | FDA MGPS threshold — Bayesian lower bound |
+
+**Investigation gate** additionally requires n ≥ 10 and PRR ≥ 5 (only strong, statistically robust, unlabeled signals trigger the LLM investigator). **Within-class table** requires n ≥ 5.
 
 All thresholds are from published EMA/FDA standards — none were tuned on semaglutide.
 
@@ -464,7 +471,7 @@ This tool is a **PRR + within-class disproportionality screener**. It is compara
 
 | Limitation | Impact |
 |------------|--------|
-| **Single-variable stratification only** | Stratified PRR (MH) supports one variable at a time (age / sex / reporter_type via `STRATIFY_PRR` env var). Cross-stratification (age × sex) is not supported. |
+| **Single-variable stratification only** | Stratified PRR (MH) runs by default on `reporter_type` (highest-yield FAERS confounder). Override with `STRATIFY_PRR=age\|sex\|reporter_type` or disable with `STRATIFY_PRR=`. Cross-stratification (age × sex) is not supported. |
 | **Age banding requires year-unit age data** | ZIP-ingested data now normalises age_cod (DEC/YR/MON/WK) to years. API-ingested data uses years natively. Data ingested before this fix should be re-indexed for accurate age bands. |
 | **No exposure normalisation** | PRR measures reporting rate, not incidence |
 | **FAERS structural biases** | Duplicate reports, Weber effect, notoriety/litigation bias (relevant for rofecoxib), stimulated reporting, co-medication confounding — all inherent to spontaneous reporting |
@@ -550,8 +557,8 @@ Phoenix is **not** started by default — `docker compose up -d` runs the pipeli
 - [x] Full FAERS 2004–2026 (historical + current)
 - [x] openFDA independent benchmark (1.7% median Δ on mechanism signals)
 - [x] Web UI — FastAPI + SSE streaming, dark-mode
-- [x] GitHub Actions CI — pure-function tests + schema smoke-import on every push
-- [x] Stratified PRR — Mantel-Haenszel by age / sex / reporter_type (set `STRATIFY_PRR` env var)
+- [x] GitHub Actions CI — 163 pure-function tests across 12 modules + schema smoke-import on every push
+- [x] Stratified PRR — Mantel-Haenszel by reporter_type (default), age or sex (set `STRATIFY_PRR` env var)
 - [x] BCPNN / IC / IC025 — WHO Uppsala standard (Bate 1998 / Norén 2006)
 - [x] Configurable comparators — `config/comparators.yaml` + auto-discovery via RxClass ATC
 - [ ] Cross-stratification (age × sex × reporter_type simultaneously)
