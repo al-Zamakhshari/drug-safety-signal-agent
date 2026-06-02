@@ -1,4 +1,4 @@
-# drug-safety-signal-agent (local OpenSearch),drug=SEMAGLUTIDE,"faers_names=OZEMPIC,RYBELSUS,SEMAGLUTIDE,WEGOVY","drug_total=82,700","faers_total=18,037,259",faers_vintage=20260331,exported=2026-06-02T10:20:08
+# drug-safety-signal-agent (local OpenSearch),drug=SEMAGLUTIDE,"faers_names=OZEMPIC,RYBELSUS,SEMAGLUTIDE,WEGOVY","drug_total=82,700","faers_total=18,037,259",faers_vintage=20260331,exported=2026-06-02T12:44:19
 reaction,n,PRR,PRR_lower_95,PRR_upper_95,ROR,ROR_lower_95,ROR_upper_95,chi2,significant,robust,q_value
 IMPAIRED GASTRIC EMPTYING,3057,84.94,81.5,88.51,88.16,84.5,91.97,182314.38,Y,Y,0.0
 WEIGHT LOSS POOR,885,82.18,76.09,88.76,83.06,76.85,89.77,51432.75,Y,Y,0.0

@@ -1,4 +1,4 @@
-# drug-safety-signal-agent (local OpenSearch),drug=ROFECOXIB,"faers_names=ROFECOXIB,VIOXX","drug_total=78,391","faers_total=18,037,259",faers_vintage=20260331,exported=2026-06-02T10:19:46
+# drug-safety-signal-agent (local OpenSearch),drug=ROFECOXIB,"faers_names=ROFECOXIB,VIOXX","drug_total=78,391","faers_total=18,037,259",faers_vintage=20260331,exported=2026-06-02T12:44:41
 reaction,n,PRR,PRR_lower_95,PRR_upper_95,ROR,ROR_lower_95,ROR_upper_95,chi2,significant,robust,q_value
 POLYTRAUMATISM,1885,312.25,291.42,334.57,319.92,298.36,343.03,247408.01,Y,Y,0.0
 VENTRICULAR HYPERTROPHY,1194,99.65,93.14,106.62,101.18,94.49,108.33,81208.35,Y,Y,0.0

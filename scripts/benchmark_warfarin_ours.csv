@@ -1,4 +1,4 @@
-# drug-safety-signal-agent (local OpenSearch),drug=WARFARIN,"faers_names=COUMADIN,JANTOVEN,WARFARIN","drug_total=135,135","faers_total=18,037,259",faers_vintage=20260331,exported=2026-06-02T10:19:03
+# drug-safety-signal-agent (local OpenSearch),drug=WARFARIN,"faers_names=COUMADIN,JANTOVEN,WARFARIN","drug_total=135,135","faers_total=18,037,259",faers_vintage=20260331,exported=2026-06-02T12:45:01
 reaction,n,PRR,PRR_lower_95,PRR_upper_95,ROR,ROR_lower_95,ROR_upper_95,chi2,significant,robust,q_value
 INTERNATIONAL NORMALISED RATIO DECREASED,1715,110.99,104.12,118.32,112.4,105.39,119.88,101675.88,Y,Y,0.0
 INTERNATIONAL NORMALISED RATIO INCREASED,8962,71.53,69.75,73.35,76.53,74.55,78.57,405233.77,Y,Y,0.0

@@ -1,4 +1,4 @@
-# openFDA reference (independent of local OpenSearch),drug=ROFECOXIB,"drug_total_openfda=45,753","n_total_openfda=20,328,575",fetched=2026-06-02T10:19:57
+# openFDA reference (independent of local OpenSearch),drug=ROFECOXIB,"drug_total_openfda=45,753","n_total_openfda=20,328,575",fetched=2026-06-02T12:44:53
 reaction,n,PRR,PRR_lower_95,PRR_upper_95,ROR,ROR_lower_95,ROR_upper_95
 CARDIOVASCULAR DISORDER,3594,74.11,71.63,76.68,80.34,77.46,83.34
 CORONARY ARTERY DISEASE,4138,71.12,68.91,73.4,78.09,75.47,80.81
