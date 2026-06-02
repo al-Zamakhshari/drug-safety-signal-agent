@@ -192,6 +192,37 @@ async def get_signal_trend(
 # reactions field, computing per-reaction rates in each period.
 # ---------------------------------------------------------------------------
 
+
+def _classify_periods(rc: int, rt: int, bc: int, bt: int) -> str:
+    """
+    Pure classification logic for two-window temporal comparison.
+
+    Extracted as a standalone function so tests can call the real implementation
+    rather than duplicating the logic. Used by compare_time_periods below.
+
+    Args:
+        rc: reaction count in recent period
+        rt: total drug reports in recent period
+        bc: reaction count in baseline period
+        bt: total drug reports in baseline period
+
+    Returns:
+        One of: EMERGING / GROWING / DECLINING / NOT REPORTED / STABLE
+    """
+    r_rate = rc / rt if rt else 0.0
+    b_rate = bc / bt if bt else 0.0
+
+    if bc == 0 and rc > 0:
+        return "EMERGING — absent in baseline, present recently"
+    elif bt > 0 and rt > 0 and r_rate > b_rate * 1.5:
+        return "GROWING — reporting rate increased vs baseline"
+    elif bt > 0 and rt > 0 and r_rate < b_rate * 0.67:
+        return "DECLINING — reporting rate fell vs baseline"
+    elif rc == 0 and bc == 0:
+        return "NOT REPORTED — no reports in either period"
+    else:
+        return "STABLE — similar rate in both periods"
+
 @tool
 async def compare_time_periods(
     drug: Annotated[str, "Drug name in ALL CAPS"],
@@ -244,17 +275,7 @@ async def compare_time_periods(
 
         r_rate = rc / rt if rt else 0.0
         b_rate = bc / bt if bt else 0.0
-
-        if bc == 0 and rc > 0:
-            interpretation = "EMERGING — absent in baseline, present recently"
-        elif bt > 0 and rt > 0 and r_rate > b_rate * 1.5:
-            interpretation = "GROWING — reporting rate increased vs baseline"
-        elif bt > 0 and rt > 0 and r_rate < b_rate * 0.67:
-            interpretation = "DECLINING — reporting rate fell vs baseline"
-        elif rc == 0 and bc == 0:
-            interpretation = "NOT REPORTED — no reports in either period"
-        else:
-            interpretation = "STABLE — similar rate in both periods"
+        interpretation = _classify_periods(rc, rt, bc, bt)
 
         return json.dumps({
             "drug":     drug,

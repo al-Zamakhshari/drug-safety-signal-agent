@@ -50,6 +50,35 @@ load_dotenv()
 
 INDEX = os.getenv("OPENSEARCH_INDEX", "faers_reports")
 
+
+def _apply_bh(p_values: np.ndarray) -> np.ndarray:
+    """
+    Benjamini–Hochberg FDR correction over a vector of p-values.
+
+    Extracted as a standalone pure function so tests can call the real
+    implementation rather than duplicating the step-up procedure.
+
+    Args:
+        p_values: array of p-values, one per tested reaction
+
+    Returns:
+        q_adjusted: BH-adjusted q-values (monotone, clipped to [0, 1])
+
+    The denominator m = len(p_values) — every reaction with a 2×2 computed
+    (including those with PRR < 2.0), which is the correct BH denominator.
+    """
+    m = len(p_values)
+    if m == 0:
+        return np.array([], dtype=float)
+
+    order  = np.argsort(p_values)
+    ranks  = np.empty(m, int)
+    ranks[order] = np.arange(1, m + 1)
+    q_raw = p_values * m / ranks
+    q_adj = np.empty(m)
+    q_adj[order] = np.minimum.accumulate(q_raw[order][::-1])[::-1]
+    return np.minimum(q_adj, 1.0)
+
 # ── Stratification helpers ──────────────────────────────────────────────────
 
 # Age bands for stratified PRR (FAERS standard, EMA guidance)
@@ -311,16 +340,10 @@ async def calculate_prr(
         m = len(tested)
         if m > 0:
             p_vals = np.array([float(_chi2_dist.sf(t["chi2"], 1)) for t in tested])
-            order  = np.argsort(p_vals)
-            ranks  = np.empty(m, int)
-            ranks[order] = np.arange(1, m + 1)
-            # Raw BH q-values, then enforce monotonicity via reverse cumulative min
-            q_raw = p_vals * m / ranks
-            q_adj = np.empty(m)
-            q_adj[order] = np.minimum.accumulate(q_raw[order][::-1])[::-1]
+            q_adj  = _apply_bh(p_vals)
             for t, qi in zip(tested, q_adj.tolist()):
-                t["q_value"]        = round(float(min(qi, 1.0)), 4)
-                t["fdr_significant"] = float(min(qi, 1.0)) < 0.05
+                t["q_value"]        = round(float(qi), 4)
+                t["fdr_significant"] = float(qi) < 0.05
 
         # Step 6: return signals with PRR ≥ min_prr; strip scratch cells
         signals = []

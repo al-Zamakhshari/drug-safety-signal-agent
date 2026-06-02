@@ -352,6 +352,36 @@ def _label_match_display(
     return "**No ⚠️**"
 
 
+def _lifecycle_status(
+    c_prr: float,
+    c_lo: float | None,
+    c_up: float | None,
+    p_prr: float,
+    p_lo: float | None,
+    p_up: float | None,
+) -> str:
+    """
+    Determine cross-run signal lifecycle status.
+
+    Extracted as a pure function so tests call the real implementation rather
+    than duplicating the logic. Used by classify_signals.
+
+    Returns: "VALIDATED" | "DISMISSED"  (NEW is handled upstream when p is None)
+
+    Logic:
+      DISMISSED:  current upper CI entirely below prior lower CI (genuine collapse)
+      VALIDATED:  CIs overlap, or any CI missing and PRR ≥ 50% of prior
+    """
+    if None in (c_lo, c_up, p_lo, p_up):
+        # CI missing on one run — 50% point-estimate fallback
+        return "VALIDATED" if c_prr >= p_prr * 0.5 else "DISMISSED"
+    if c_up < p_lo:
+        # Current CI entirely below prior CI — genuine signal collapse
+        return "DISMISSED"
+    # CIs overlap — change is within sampling noise
+    return "VALIDATED"
+
+
 # ---------------------------------------------------------------------------
 # Phase-1 output parser — robust structured extraction
 # ---------------------------------------------------------------------------
@@ -818,21 +848,15 @@ async def classify_signals(state: DrugSafetyState) -> dict:
         if p is None:
             status = "NEW"
         else:
-            # CI-overlap test: use prr_lower/prr_upper from both runs when available
-            c_lo = s.get("prr_lower")
-            c_up = s.get("prr_upper")
-            p_lo = p.get("prr_lower")
-            p_up = p.get("prr_upper")
-
-            if None in (c_lo, c_up, p_lo, p_up):
-                # CI absent on one run — fall back to 50% point-estimate rule
-                status = "VALIDATED" if c_prr >= p_prr * 0.5 else "DISMISSED"
-            elif c_up < p_lo:
-                # Current CI entirely below prior CI → genuine signal collapse
-                status = "DISMISSED"
-            else:
-                # CIs overlap (current may be higher or slightly lower) → signal persists
-                status = "VALIDATED"
+            # CI-overlap test via _lifecycle_status — the pure helper tests call directly
+            status = _lifecycle_status(
+                c_prr = c_prr,
+                c_lo  = s.get("prr_lower"),
+                c_up  = s.get("prr_upper"),
+                p_prr = p_prr,
+                p_lo  = p.get("prr_lower"),
+                p_up  = p.get("prr_upper"),
+            )
 
         signal_status.append({
             "reaction":   rxn,

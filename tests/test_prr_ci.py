@@ -7,7 +7,7 @@ analytically known results.
 import math
 import numpy as np
 import pytest
-from agent.tools.prr import _prr_ci, _yates_chi2
+from agent.tools.prr import _prr_ci, _yates_chi2, _apply_bh
 
 
 class TestPRRCI:
@@ -68,19 +68,13 @@ class TestPRRCI:
 
 
 class TestBHFDR:
-    """Benjamini-Hochberg FDR correction — structural properties."""
+    """Benjamini-Hochberg FDR correction — structural properties.
+    Calls the real _apply_bh() from prr.py (not a local copy).
+    """
 
     def _apply_bh(self, p_values: list[float]) -> list[float]:
-        """Replicate the BH code from calculate_prr for unit testing."""
-        p = np.array(p_values)
-        m = len(p)
-        order  = np.argsort(p)
-        ranks  = np.empty(m, int)
-        ranks[order] = np.arange(1, m + 1)
-        q_raw = p * m / ranks
-        q_adj = np.empty(m)
-        q_adj[order] = np.minimum.accumulate(q_raw[order][::-1])[::-1]
-        return [float(min(qi, 1.0)) for qi in q_adj]
+        """Delegate to the real implementation in prr.py."""
+        return _apply_bh(np.array(p_values)).tolist()
 
     def test_q_values_monotone_with_p_values(self):
         """BH q-values should be non-decreasing as p-values increase."""

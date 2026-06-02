@@ -31,16 +31,16 @@ Detects drug safety signals from FDA FAERS adverse event reports using a fully l
 | Signal memory | Cross-run persistence | OpenSearch ML Memory (3.6+) |
 | Web interface | Real-time streaming briefing | FastAPI + SSE |
 
-**Example output — semaglutide, 82,699 reports, 11.9M baseline:**
+**Example output — semaglutide, 82,699 reports, 18M baseline (2004–2026):**
 
 ```
-### PRR + ROR + EBGM Signals (EMA/FDA standards)
-| Reaction                  | PRR (95% CI)      | ROR (95% CI)      | EBGM / EB05 | χ²/CI/FDR | n     | Label? |
-|---------------------------|-------------------|-------------------|-------------|-----------|-------|--------|
-| IMPAIRED GASTRIC EMPTYING | 82.72 (79.8–85.7) | 85.86 (82.1–89.8) | 78.4 / 72.1 ✓| ✓✓✓    | 3,057 | Yes    |
-| GLYCOSYLATED HB INCREASED | 11.54 (10.9–12.2) | 11.68 (11.0–12.4) | 11.2 / 10.8 ✓| ✓✓✓   | 1,111 | No ⚠️  |
-| PANCREATITIS              | 10.38 (9.8–11.0)  | 10.55 (9.9–11.2)  | 9.9 / 9.4 ✓  | ✓✓✓   | 1,504 | Yes    |
-| BLOOD GLUCOSE DECREASED   | 9.97 (9.4–10.6)   | 10.12 (9.5–10.8)  | 9.5 / 8.9 ✓  | ✓✓✓   | 1,311 | No ⚠️  |
+### PRR + ROR + EBGM + BCPNN Signals (EMA/FDA/WHO standards)
+| Reaction                  | PRR (95% CI)      | ROR (95% CI)      | EBGM / EB05 | IC / IC025 | χ²/CI/FDR | n     | Label? |
+|---------------------------|-------------------|-------------------|-------------|------------|-----------|-------|--------|
+| IMPAIRED GASTRIC EMPTYING | 82.72 (79.8–85.7) | 85.86 (82.1–89.8) | 78.4 / 72.1 ✓| 6.3 / 6.2 ✓| ✓✓✓  | 3,057 | Yes    |
+| GLYCOSYLATED HB INCREASED | 11.54 (10.9–12.2) | 11.68 (11.0–12.4) | 11.2 / 10.8 ✓| 3.4 / 3.3 ✓| ✓✓✓  | 1,111 | No ⚠️  |
+| PANCREATITIS              | 10.38 (9.8–11.0)  | 10.55 (9.9–11.2)  | 9.9 / 9.4 ✓  | 3.3 / 3.2 ✓| ✓✓✓  | 1,504 | Yes    |
+| BLOOD GLUCOSE DECREASED   | 9.97 (9.4–10.6)   | 10.12 (9.5–10.8)  | 9.5 / 8.9 ✓  | 3.2 / 3.1 ✓| ✓✓✓  | 1,311 | No ⚠️  |
 
 Risk: HIGH  |  Action: ESCALATE
 ```
@@ -113,7 +113,7 @@ flowchart TD
 ```mermaid
 flowchart TB
     subgraph INFRA["🐳 Infrastructure  (Docker Compose)"]
-        OS[("OpenSearch 3.6.0\nfaers_reports — 11.9M docs\nfaers_ml_rates — 15K class-ratio docs\nML Memory — cross-run signal registry")]
+        OS[("OpenSearch 3.6.0\nfaers_reports — 18M docs (2004–2026)\nfaers_ml_rates — 17K class-ratio docs\nML Memory + agent-signal-runs — lifecycle registry")]
         QW["Qwen3.5-9B Q4_K_XL\nDocker Model Runner\n5.6 GB  ·  Apple Metal / CUDA"]
         PX["Arize Phoenix\nOTLP traces  ·  port 4317"]
     end
@@ -206,10 +206,10 @@ flowchart TD
 
         DS & CE --> P2CHECK
 
-        P2CHECK{"DRUG_SPECIFIC\nor ratio > 7?"}
+        P2CHECK{"DRUG_SPECIFIC\nor ratio > 5?"}
 
         subgraph P2["Phase 2 — Free-form  (conditional)"]
-            FT["Model chooses tools freely\nDataDistributionTool — time periods\nOpenSearch MCP — raw DSL queries\nget_prr — alternative name variants\ncheck_class_effect — other drug classes"]
+            FT["Model chooses tools freely\ncompare_time_periods — EMERGING/GROWING test\nAD tools — which time window spiked\nget_prr — alternative name variants\ncheck_class_effect — other drug classes"]
         end
 
         P2CHECK -->|Yes| P2
@@ -234,17 +234,19 @@ The briefing table is rendered by Python — `write_report` passes pre-computed 
 
 ---
 
-### 2. Three estimators (PRR + ROR + EBGM) — each fixes a failure mode of the others
+### 2. Four estimators (PRR + ROR + EBGM + BCPNN) — each fixes a failure mode of the others
 
 ```
-PRR alone:  correct formula, but PRR=15 on n=3 looks as confident as PRR=15 on n=3000
-+ 95% CI:  lower bound penalises small n — PRR=15 on n=3 gets CI crossing 1.0 (not robust)
-+ BH-FDR:  corrects for testing ~50 reactions simultaneously — controls false discovery rate
-+ EBGM:    Bayesian shrinkage across all reactions — PRR=15 on n=3 → EB05=1.1 (not flagged)
-           PRR=15 on n=3000 → EB05=14.5 (correctly flagged)
+PRR alone:   correct formula, but PRR=15 on n=3 looks as confident as PRR=15 on n=3000
++ 95% CI:   lower bound penalises small n — PRR=15 on n=3 gets CI crossing 1.0 (not robust)
++ BH-FDR:   corrects for testing ~50 reactions simultaneously — controls false discovery rate
++ EBGM:     Bayesian shrinkage (FDA MGPS) — PRR=15 on n=3 → EB05=1.1 (not flagged)
+            PRR=15 on n=3000 → EB05=14.5 (correctly flagged)
++ BCPNN IC: WHO Uppsala complement — IC025 > 0 is the WHO signal flag
+            Both GPS and BCPNN agree on strong signals; disagreement at small n is informative
 ```
 
-The EBGM is the FDA MGPS standard (DuMouchel 1999). It fits a 2-component Gamma-Poisson mixture prior across all (observed, expected) pairs for the drug, so rare reactions borrow strength from the overall drug profile. ROR is the WHO/Uppsala Monitoring Centre complement to PRR — they agree for rare reactions and diverge for common ones, which is itself a diagnostic signal.
+EBGM (DuMouchel 1999) fits a 2-component Gamma-Poisson mixture prior across all (observed, expected) pairs for the drug. BCPNN (Bate 1998 / Norén 2006) uses a Beta-Binomial prior via the closed-form IC formula. ROR is the WHO/Uppsala Monitoring Centre complement to PRR — they agree for rare reactions and diverge for common ones, which is itself a diagnostic signal.
 
 ---
 
@@ -338,7 +340,7 @@ docker compose up -d
 uv run python -m ingestion.faers_indexer --drug semaglutide --limit 6000
 uv run python -m ingestion.faers_indexer --drug rofecoxib --limit 2000
 
-# Full dataset — 2018–2026, ~11.9M reports, ~1 hour + download
+# Full dataset — 2018–2026, ~12M reports, ~1 hour + download
 ./ingestion/download_faers.sh
 uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 

@@ -13,7 +13,7 @@ Signal lifecycle (classify_signals logic):
   DISMISSED  — in prior run AND prr < 0.5 × prior_prr
 """
 import pytest
-from agent.pipeline import _parse_classification
+from agent.pipeline import _parse_classification, _lifecycle_status
 
 
 class TestParseClassification:
@@ -135,20 +135,16 @@ class TestPhase2Trigger:
 
 
 class TestSignalLifecycle:
-    """NEW / VALIDATED / DISMISSED assignment logic — CI-overlap version."""
+    """NEW / VALIDATED / DISMISSED — calls the real _lifecycle_status() from pipeline.py."""
 
     def _classify(self, c_prr, c_lo=None, c_up=None, prior=None):
-        """Replicate classify_signals logic exactly."""
+        """Delegate to the real implementation. NEW handled here; VALIDATED/DISMISSED via helper."""
         if prior is None:
             return "NEW"
         p_prr = prior.get("prr", 0)
         p_lo  = prior.get("prr_lower")
         p_up  = prior.get("prr_upper")
-        if None in (c_lo, c_up, p_lo, p_up):
-            return "VALIDATED" if c_prr >= p_prr * 0.5 else "DISMISSED"
-        if c_up < p_lo:
-            return "DISMISSED"
-        return "VALIDATED"
+        return _lifecycle_status(c_prr, c_lo, c_up, p_prr, p_lo, p_up)
 
     def test_new_signal(self):
         assert self._classify(8.5) == "NEW"

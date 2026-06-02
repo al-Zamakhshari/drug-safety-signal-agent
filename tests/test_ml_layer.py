@@ -8,6 +8,7 @@ Both are deterministic and don't need OpenSearch to test their core behaviour.
 import json
 import pytest
 from agent.tools.signal_memory import build_memory_context
+from agent.tools.investigator_tools import _classify_periods
 
 
 # ---------------------------------------------------------------------------
@@ -131,25 +132,13 @@ class TestBuildMemoryContext:
 class TestCompareTimePeriodsBranches:
     """
     The core classification logic (EMERGING/GROWING/DECLINING/STABLE/NOT REPORTED)
-    is pure arithmetic on counts — test it without OpenSearch by reproducing the
-    exact branching conditions from investigator_tools.py.
+    is tested by calling the REAL _classify_periods() helper extracted from
+    investigator_tools.py — not a local copy of the logic.
     """
 
     def _classify(self, rc: int, rt: int, bc: int, bt: int) -> str:
-        """Mirror the branch logic in compare_time_periods exactly."""
-        r_rate = rc / rt if rt else 0.0
-        b_rate = bc / bt if bt else 0.0
-
-        if bc == 0 and rc > 0:
-            return "EMERGING — absent in baseline, present recently"
-        elif bt > 0 and rt > 0 and r_rate > b_rate * 1.5:
-            return "GROWING — reporting rate increased vs baseline"
-        elif bt > 0 and rt > 0 and r_rate < b_rate * 0.67:
-            return "DECLINING — reporting rate fell vs baseline"
-        elif rc == 0 and bc == 0:
-            return "NOT REPORTED — no reports in either period"
-        else:
-            return "STABLE — similar rate in both periods"
+        """Delegate to the real implementation."""
+        return _classify_periods(rc, rt, bc, bt)
 
     def test_emerging(self):
         """Zero in baseline, present recently → EMERGING."""
