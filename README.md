@@ -494,10 +494,10 @@ uv run python scripts/benchmark_vs_openvigil.py benchmark semaglutide
 
 | Reaction | PRR (ours) | PRR (openFDA) | Δ% |
 |---|---|---|---|
-| DECREASED APPETITE | 5.49 | 5.51 | **0.4%** ✅ |
-| GLYCOSYLATED HB INCREASED | 11.54 | 11.62 | **0.7%** ✅ |
-| CONSTIPATION | 5.87 | 5.95 | **1.3%** ✅ |
-| INTESTINAL OBSTRUCTION | 7.64 | 7.51 | **1.7%** ✅ |
+| DECREASED APPETITE | 5.52 | 5.51 | **0.2%** ✅ |
+| GLYCOSYLATED HB INCREASED | 11.80 | 11.62 | **1.5%** ✅ |
+| CONSTIPATION | 5.79 | 5.95 | **2.7%** ✅ |
+| INTESTINAL OBSTRUCTION | 7.17 | 7.51 | **4.5%** ✅ |
 
 **Rofecoxib — cardiovascular withdrawal signals:**
 
