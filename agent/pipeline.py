@@ -3,15 +3,17 @@ Drug Safety Signal Detection — LangGraph pipeline
 
 Node responsibilities:
   Python nodes   → all data retrieval and computation (deterministic)
-  Qwen3.5-9B    → two roles:
-    1. investigator_node: function calling (thinking=ON) — class effects / DDI / trends
-    2. write_report: clinical prose only (thinking=OFF, fast)
+  LLM (default: Gemma 4 12B MLX via Ollama) → two roles:
+    1. investigate: Phase 1 tools + ratio computed in Python; LLM writes
+       one INSIGHT sentence per signal (150 tokens, no arithmetic)
+       Phase 2: free-form deep investigation (tools, time-window reasoning)
+    2. write_report: Key Findings narrative only (prose, no numbers re-typed)
 
 Graph:
   resolve_names → load_memory → calculate_prr → anomaly_detection → fetch_label
        → [search_literature?]
-       → [investigator?]
-       → write_report → save_memory
+       → [investigate?]
+       → classify_signals → write_report → save_memory
 """
 
 import os
@@ -39,20 +41,21 @@ from agent.tools.opensearch_mcp import list_opensearch_tools, call_opensearch_to
 
 load_dotenv()
 
-LOCAL_MODEL_URL  = os.getenv("LOCAL_MODEL_URL", "http://localhost:12434/v1")
-LOCAL_MODEL_NAME = os.getenv("LOCAL_MODEL_NAME", "docker.io/ai/qwen3.5:9B-UD-Q4_K_XL")
+LOCAL_MODEL_URL  = os.getenv("LOCAL_MODEL_URL", "http://localhost:11434/v1")
+LOCAL_MODEL_NAME = os.getenv("LOCAL_MODEL_NAME", "gemma4:12b-mlx")
 GOOGLE_API_KEY   = os.getenv("GOOGLE_API_KEY", "")
 
 # ---------------------------------------------------------------------------
-# Shared model — ChatOpenAI pointing at Docker Model Runner
+# Shared model — ChatOpenAI pointing at Ollama (default) or Docker Model Runner
+# Default: gemma4:12b-mlx via Ollama (see .env.example / LOCAL_MODEL_URL)
 # ---------------------------------------------------------------------------
 
 def _model(max_tokens: int = 800) -> ChatOpenAI:
-    """Report writing model — Qwen3.5-9B with thinking=OFF (fast prose)."""
+    """Prose-writing model — used for report narrative and fallback paths."""
     return ChatOpenAI(
         model=LOCAL_MODEL_NAME,
         base_url=LOCAL_MODEL_URL,
-        api_key="docker",
+        api_key="ollama" if "11434" in LOCAL_MODEL_URL else "docker",
         max_tokens=max_tokens,
         temperature=0,
     )
@@ -60,23 +63,24 @@ def _model(max_tokens: int = 800) -> ChatOpenAI:
 
 def _model_no_thinking(max_tokens: int = 500) -> ChatOpenAI:
     """
-    Qwen3.5 with thinking disabled — for report writing.
-    3x faster than thinking mode, same quality output.
-    chat_template_kwargs={"enable_thinking": False} is the Qwen3 way to disable thinking.
-    Falls back to standard model if Qwen3.5 is not available.
+    Prose-only model for INSIGHT sentences and report narrative.
+
+    Originally used chat_template_kwargs={"enable_thinking": False} for Qwen3
+    thinking-mode control. With the default Gemma 4 12B MLX via Ollama, this
+    parameter is silently ignored (Ollama's OpenAI endpoint doesn't forward it,
+    and Gemma 4 has no separate thinking mode). Kept for compatibility if
+    switching back to a Qwen3 backend.
     """
     return ChatOpenAI(
         model=INVESTIGATOR_MODEL,
         base_url=LOCAL_MODEL_URL,
-        api_key="docker",
+        api_key="ollama" if "11434" in LOCAL_MODEL_URL else "docker",
         max_tokens=max_tokens,
         temperature=0,
-        # extra_body passes custom params through the OpenAI client to llama.cpp
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
 
 
-INVESTIGATOR_MODEL = os.getenv("INVESTIGATOR_MODEL", "docker.io/ai/qwen3.5:9B-UD-Q4_K_XL")
+INVESTIGATOR_MODEL = os.getenv("INVESTIGATOR_MODEL", "gemma4:12b-mlx")
 
 
 def _model_31b():

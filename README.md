@@ -9,7 +9,7 @@ cd drug-safety-signal-agent
 cp .env.example .env                    # step 0: copy config (defaults work out of the box)
 uv sync
 docker compose up -d                    # start OpenSearch
-ollama pull gemma4:12b-mlx              # pull Gemma 4 12B MLX ~10GB (once, Apple Silicon)
+ollama pull gemma4:12b-mlx              # pull Gemma 4 12B MLX ~10GB (once)
 ./ingestion/download_faers.sh           # downloads FAERS 2018–2026 to ~/faers_data/
 uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 uv run python -m ingestion.discover_comparators --drug <your-drug>  # per drug you want
@@ -88,7 +88,7 @@ flowchart TD
     CS["🔁 classify_signals\nCross-run lifecycle diff\nNEW - VALIDATED - DISMISSED\nCI-overlap test vs prior run\nagent-signal-runs index"]
     CS --> WR
 
-    WR["✍️ write_report\nQwen3.5-9B  thinking=OFF\nnarrative prose only\nnumbers never re-typed by model"]
+    WR["✍️ write_report\nGemma 4 12B MLX\nnarrative prose only\nnumbers never re-typed by model"]
     WR --> SM
 
     SM["💾 save_memory\nOpenSearch ML Memory\npersist text trail for next run"]
@@ -107,7 +107,7 @@ flowchart TD
 ```
 
 > **Blue nodes** = deterministic Python — same input always produces the same output.  
-> **Yellow nodes** = Qwen3.5-9B — advisory, non-deterministic, clearly labelled in the briefing.
+> **Yellow nodes** = Gemma 4 12B MLX (via Ollama) — advisory, non-deterministic, clearly labelled in the briefing.
 
 ---
 
@@ -117,7 +117,7 @@ flowchart TD
 flowchart TB
     subgraph INFRA["🐳 Infrastructure  (Docker Compose)"]
         OS[("OpenSearch 3.6.0\nfaers_reports — 18M docs (2004–2026)\nfaers_ml_rates — 17K class-ratio docs\nML Memory + agent-signal-runs — lifecycle registry")]
-        QW["Qwen3.5-9B Q4_K_XL\nDocker Model Runner\n5.6 GB - Apple Metal / CUDA"]
+        QW["Gemma 4 12B MLX\nOllama (native MLX)\n10 GB - Apple Silicon / GPU"]
         PX["Arize Phoenix\nOTLP traces - port 4317"]
     end
 
@@ -129,9 +129,9 @@ flowchart TB
         P5["Label matching\nMedDRA LLT + negation + direction\n3-state: Yes / Possible / No ⚠️"]
     end
 
-    subgraph LLM_LAYER["🤖 LLM Layer  (Qwen3.5-9B — advisory)"]
-        L1["Investigation  thinking=ON\nPhase 1: grounded function calls\nPhase 2: free-form exploration\nTools: get_prr, check_class_effect\nget_signal_trend, compare_time_periods"]
-        L2["Report writing  thinking=OFF\nNarrative prose only\nNo numbers re-typed\n_DISCLAIMER always appended"]
+    subgraph LLM_LAYER["🤖 LLM Layer  (Gemma 4 12B MLX — advisory)"]
+        L1["Investigation\nPhase 1: Python calls tools + ratio (deterministic)\nLLM: one INSIGHT sentence per signal\nPhase 2: free-form exploration\nTools: get_prr, check_class_effect\nget_signal_trend, compare_time_periods"]
+        L2["Report writing\nKey Findings narrative only\nNo numbers re-typed\n_DISCLAIMER always appended"]
     end
 
     OS -->|aggregations| P1
@@ -329,7 +329,7 @@ Everything runs locally via Docker. Zero external dependencies.
 | Component | Technology | License |
 |-----------|-----------|---------|
 | Database | [OpenSearch 3.6.0](https://opensearch.org) | Apache 2.0 |
-| LLM | [Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) Q4_K_XL (~5.6GB) via Docker Model Runner | Apache 2.0 |
+| LLM | [Gemma 4 12B MLX](https://ollama.com/library/gemma4) via Ollama (~10GB) via Docker Model Runner | Apache 2.0 |
 | Agent framework | [LangGraph](https://langchain-ai.github.io/langgraph/) | MIT |
 | Web UI | FastAPI + SSE streaming | MIT |
 | Ingestion | [Polars](https://pola.rs) — 3× less memory than pandas | MIT |
