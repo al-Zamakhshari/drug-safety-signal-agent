@@ -1,16 +1,18 @@
 # Drug Safety Signal Agent — Local Edition
 
 > Detect pharmacovigilance signals from FDA FAERS adverse event data.  
-> Runs entirely on your laptop. No API keys. No cloud. No licenses.
+> Runs entirely on your laptop. No API keys required. No cloud. No licenses.
 
 ```bash
 git clone https://github.com/al-Zamakhshari/drug-safety-signal-agent
 cd drug-safety-signal-agent
+cp .env.example .env                    # step 0: copy config (defaults work out of the box)
 uv sync
-docker compose up -d                    # pulls Qwen3.5-9B ~5.6GB on first run
+docker compose up -d                    # start OpenSearch + Model Runner
+docker model pull ai/qwen3.5:9B-UD-Q4_K_XL   # pull Qwen3.5-9B ~5.6GB (once)
 ./ingestion/download_faers.sh           # downloads FAERS 2018–2026 to ~/faers_data/
 uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
-uv run python -m ingestion.discover_comparators --drug <drug>  # for each drug you want within-class analysis
+uv run python -m ingestion.discover_comparators --drug <your-drug>  # per drug you want
 uv run python -m ingestion.compute_class_ratio
 uv run python -m ingestion.register_mcp_tools
 uv run python -m app.server            # → http://localhost:8080
@@ -76,7 +78,7 @@ flowchart TD
     SL["📚 search_lit\nPubMed API\ntop 3 unlabeled signals"]
     SL --> R2
 
-    R2{"PRR >= 5\nAND robust CI\nAND FDR q < 0.05\nAND unlabeled?"}
+    R2{"PRR >= 5\nAND n >= 10\nAND robust CI\nAND FDR q < 0.05\nAND unlabeled?"}
     R2 -->|Yes| INV
     R2 -->|No| CS
 
@@ -207,7 +209,7 @@ flowchart TD
 
         DS & CE --> P2CHECK
 
-        P2CHECK{"DRUG_SPECIFIC\nor ratio > 5?"}
+        P2CHECK{"DRUG_SPECIFIC\nor ratio > 5?\n(Phase-1 gate)"}
 
         subgraph P2["Phase 2: Free-form - conditional"]
             FT["Model chooses tools freely\ncompare_time_periods: EMERGING/GROWING\nAD tools: which time window spiked\nget_prr: alternative name variants\ncheck_class_effect: other drug classes"]
@@ -299,6 +301,8 @@ FDA label text uses clinical prose; FAERS uses MedDRA Preferred Terms. The misma
 
 Example: FDA label says "delays gastric emptying" — MedDRA PT is "IMPAIRED GASTRIC EMPTYING". A pure string match misses this. The fix: fetch official MedDRA Lower-Level Terms from openFDA (free, no license), cache them locally, and try each LLT as a matching candidate. "Delays" matches "impaired" via the synonym dictionary + LLT expansion.
 
+LLT mappings are cached in `.meddra_llt_cache.json` (repo root) after the first fetch, so subsequent runs work fully offline. This file is gitignored — it is populated automatically and safe to delete to force a refresh.
+
 ---
 
 ### 10. HTTP retry with exponential backoff
@@ -338,7 +342,7 @@ Everything runs locally via Docker. Zero external dependencies.
 - **16GB RAM** recommended (OpenSearch 1.5GB + Qwen3.5-9B ~5.6GB)
 - **~10GB disk** for full FAERS 2018–2026 dataset
 
-**Optional:** Set `GOOGLE_API_KEY` (free at [aistudio.google.com](https://aistudio.google.com)) to upgrade the investigator to Gemma4-31B via Google AI Studio. Set `INVESTIGATOR_MODEL` to override the local model path.
+**Optional:** Set `GOOGLE_API_KEY` (free at [aistudio.google.com](https://aistudio.google.com)) to upgrade the investigator to a cloud LLM via Google AI Studio (e.g. `gemini-2.0-flash`). Set `INVESTIGATOR_MODEL` to override the local model path. If the Google API returns a 500/503/429 error, the investigator automatically falls back to the local Qwen3.5-9B for that signal — results remain valid but advisory quality may vary between runs.
 
 ---
 
@@ -377,10 +381,12 @@ uv run python -m ingestion.register_mcp_tools
 uv run python -m app.server          # → http://localhost:8080
 
 # Web server endpoints:
-#   GET /                          → streaming HTML dashboard
-#   GET /analyze?drug=semaglutide  → SSE stream of pipeline events + briefing
-#   GET /api/briefing/semaglutide  → REST: full structured JSON (prr_signals,
-#                                    anomaly_signals, investigation, signal_status)
+#   GET /                          → redirects to /static/index.html (streaming dashboard)
+#   GET /analyze?drug=semaglutide  → SSE stream of pipeline events + final briefing
+#   GET /api/briefing/semaglutide  → REST: full structured JSON response:
+#                                    {drug_name, drug_names, drug_total, faers_total,
+#                                     prr_signals, anomaly_signals, literature,
+#                                     investigation, signal_status, briefing, error}
 #   GET /health                    → {"status": "ok"}
 
 # 6b. CLI
@@ -509,6 +515,8 @@ Two independent code paths (our OpenSearch pipeline vs the FDA's own API) comput
 ```bash
 uv run python scripts/benchmark_vs_openvigil.py benchmark semaglutide
 ```
+
+> **Note:** The delta percentages below require the full ZIP-ingested 2004–2026 dataset (`faers_zip_indexer --all-drugs`). The quick-demo API load (`faers_indexer --limit 6000`) only covers a small subset and will produce different PRR values.
 
 ### Results — full 18M-report dataset (2004–2026, June 2026)
 

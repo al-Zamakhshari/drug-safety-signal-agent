@@ -84,13 +84,11 @@ async def get_or_create_memory(drug: str) -> str:
     Return the ML Memory container ID for a drug, creating if needed.
     IDs persisted in OpenSearch so they survive process restarts.
 
-    Race-condition fix (Rec 2 from evaluation): use PUT /{index}/_doc/{drug_upper}
-    instead of POST /{index}/_doc (auto-id). A deterministic doc ID means concurrent
-    workers writing different memory_ids will converge on the last writer's value.
-    The _search lookup below still reads the authoritative ID from OpenSearch, so
-    all workers stay consistent after the first `_search` round-trip.
-    An `op_type=create` 409 conflict is caught and the existing ID is returned —
-    ensuring zero orphaned memory containers under concurrent worker startup.
+    Race-condition fix: uses PUT /{index}/_create/{drug_upper} (op_type=create)
+    instead of POST /{index}/_doc (auto-id). The _create endpoint returns 409 if
+    a document for this drug already exists — the 409 loser re-reads the winner's
+    memory_id, ensuring all workers converge on the same container with zero
+    orphaned ML Memory objects under concurrent uvicorn worker startup.
     """
     drug_upper = drug.upper()
     if drug_upper in _memory_cache:
