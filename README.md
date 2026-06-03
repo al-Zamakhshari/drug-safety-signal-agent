@@ -82,7 +82,7 @@ flowchart TD
     R2 -->|Yes| INV
     R2 -->|No| CS
 
-    INV["🔬 investigate\nQwen3.5-9B  thinking=ON\nPhase 1: grounded tool calls\nPhase 2: free-form exploration"]
+    INV["🔬 investigate\nPhase 1: Python (tools + ratio)\nPhase 2: LLM free-form exploration"]
     INV --> CS
 
     CS["🔁 classify_signals\nCross-run lifecycle diff\nNEW - VALIDATED - DISMISSED\nCI-overlap test vs prior run\nagent-signal-runs index"]
@@ -187,31 +187,32 @@ flowchart LR
 
 ## Investigation Flow
 
-For each strong unlabeled signal, Qwen3.5-9B runs two sequential phases:
+For each strong unlabeled signal, the pipeline runs two sequential phases:
 
 ```mermaid
 flowchart TD
-    SIG["Strong unlabeled signal\nPRR >= 5, robust CI, FDR q < 0.05"]
+    SIG["Strong unlabeled signal\nPRR >= 5, n >= 10, robust CI, FDR q < 0.05"]
     SIG --> LOOP
 
-    subgraph LOOP["Per-signal Python loop - one LLM call per reaction - guarantees tool execution"]
+    subgraph LOOP["Per-signal Python loop — one iteration per reaction"]
         direction TB
 
-        subgraph P1["Phase 1: Grounded - always runs"]
-            T1["Step 1: get_prr\nWrite exact JSON result\nprevents knowledge substitution"]
-            T2["Step 2: check_class_effect\ncompare PRR vs 3 comparators\nidentify LOWEST comparator value"]
-            T3["Step 3: get_signal_trend\nquarterly timeline"]
+        subgraph P1["Phase 1: Python — always runs (no LLM for arithmetic)"]
+            T1["_get_prr(drug, reaction)\nDirect OpenSearch call"]
+            T2["_get_prr × comparators\nmin(comparator_prrs) → lowest"]
+            T3["get_signal_trend\nquarterly timeline"]
             T1 --> T2 --> T3
-            T3 --> C1{"drug PRR / lowest\ncomparator > 5?"}
+            T3 --> C1{"drug_prr / lowest_comp > 5?\n(pure Python arithmetic)"}
             C1 -->|Yes| DS["DRUG_SPECIFIC"]
             C1 -->|No| CE["CLASS_EFFECT"]
+            DS & CE --> INS["LLM: one INSIGHT sentence\n(thinking=OFF, 150 tokens)"]
         end
 
-        DS & CE --> P2CHECK
+        INS --> P2CHECK
 
         P2CHECK{"DRUG_SPECIFIC\nor ratio > 5?\n(Phase-1 gate)"}
 
-        subgraph P2["Phase 2: Free-form - conditional"]
+        subgraph P2["Phase 2: Free-form LLM — conditional"]
             FT["Model chooses tools freely\ncompare_time_periods: EMERGING/GROWING\nAD tools: which time window spiked\nget_prr: alternative name variants\ncheck_class_effect: other drug classes"]
         end
 
@@ -219,11 +220,11 @@ flowchart TD
         P2CHECK -->|No| OUT
         P2 --> OUT
 
-        OUT["CLASSIFICATION / TREND / INSIGHT\ngrounded in tool-call results"]
+        OUT["CLASSIFICATION / TREND / INSIGHT\nall numbers from Python"]
     end
 ```
 
-> **Why "paste exact JSON"?** Without explicit grounding, thinking models pre-reason about all signals during the `<think>` phase and skip actual tool calls for signals 2–3, substituting training knowledge for real FAERS data. Forcing the model to quote the raw JSON response makes tool execution mandatory and verifiable.
+> **Why Python for Phase 1 arithmetic?** Routing `min(comparator_prrs)` and `ratio > 5` through an LLM introduces failure modes independent of model quality — any model can misidentify the minimum over 3 numbers under the right context conditions. Python is deterministic. Phase 2 (open-ended tool selection, time-window reasoning, hypothesis synthesis) is where LLM reasoning genuinely adds value and stays.
 
 ---
 
@@ -267,17 +268,19 @@ A common implementation error: apply BH only to signals that already passed the 
 
 ---
 
-### 5. Qwen3.5-9B: thinking=ON for investigation, thinking=OFF for report
+### 5. Phase 1 classification is Python, not LLM
 
-Qwen3.5's extended thinking mode lets the model reason step-by-step before producing output. For investigation, this is essential: it correctly identifies the *lowest* comparator PRR (not the average, not the highest), enabling accurate DRUG_SPECIFIC classification. Without thinking, the model picks the first comparator it mentions.
+The ratio `drug_prr / min(comparator_prrs)` and the `> 5` threshold are pure arithmetic over a 3-element dict. Routing them through an LLM introduces a whole class of failure (misidentified minimum, wrong threshold application) that is independent of model quality — any model can misclassify under the right context conditions. Python cannot.
 
-For report writing, thinking=OFF cuts latency from ~69s to ~3s with no quality loss on prose generation. The `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` flag is Qwen3's native way to disable the thinking mode via the OpenAI-compatible API.
+Moving this to Python produced a concrete, measurable improvement: IMPAIRED GASTRIC EMPTYING (ratio 22.46x) and ERUCTATION (13.21x) were previously misclassified as CLASS_EFFECT by the LLM; Python correctly flags them DRUG_SPECIFIC, which triggers Phase 2 deep investigation on exactly the signals that warrant it.
+
+The LLM's Phase 1 job is now exactly one sentence: the INSIGHT (clinical interpretation, grounded in the pre-computed facts). `thinking=OFF`, `max_tokens=150`. Phase 2 (free-form tool selection, hypothesis synthesis) is where reasoning genuinely earns its cost.
 
 ---
 
-### 6. Per-signal investigation loop
+### 6. Per-signal Python loop
 
-The first implementation used a single prompt listing all signals. Thinking models pre-reason all of them in the `<think>` block, then only execute tool calls for signal 1 and extrapolate the rest from their reasoning. The fix: one `ainvoke` call per signal, inside a Python `for` loop. This guarantees a fresh context for each signal and forces tool execution for every reaction.
+The first implementation used a single prompt listing all signals. Thinking models pre-reason all of them in the `<think>` block and extrapolate results for signals 2–3 from training knowledge. The fix: one iteration per signal in a Python `for` loop. Phase 1 tool calls are now direct async Python calls (no LLM context involved). Phase 2 uses a fresh React agent context per signal, preventing cross-signal contamination.
 
 ---
 
@@ -576,7 +579,7 @@ Phoenix is **not** started by default — `docker compose up -d` runs the pipeli
 - [x] FDA label cross-reference — MedDRA LLT-expanded, negation-aware, sentence-scoped
 - [x] Three-state label match (Yes / Possible / No)
 - [x] PubMed literature evidence
-- [x] Two-phase investigation — grounded Phase 1 + free-form Phase 2
+- [x] Two-phase investigation — Python Phase 1 (deterministic) + LLM Phase 2 (free-form)
 - [x] Deterministic table rendering — numbers never re-typed by model
 - [x] Signal registry — OpenSearch ML Memory (cross-run persistence)
 - [x] Polars ingestion — 3× less memory, handles AERS + FAERS formats
