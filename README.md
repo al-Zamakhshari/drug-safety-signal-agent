@@ -8,8 +8,8 @@ git clone https://github.com/al-Zamakhshari/drug-safety-signal-agent
 cd drug-safety-signal-agent
 cp .env.example .env                    # step 0: copy config (defaults work out of the box)
 uv sync
-docker compose up -d                    # start OpenSearch + Model Runner
-docker model pull ai/qwen3.5:9B-UD-Q4_K_XL   # pull Qwen3.5-9B ~5.6GB (once)
+docker compose up -d                    # start OpenSearch
+ollama pull gemma4:12b-mlx              # pull Gemma 4 12B MLX ~10GB (once, Apple Silicon)
 ./ingestion/download_faers.sh           # downloads FAERS 2018–2026 to ~/faers_data/
 uv run python -m ingestion.faers_zip_indexer --dir ~/faers_data --all-drugs
 uv run python -m ingestion.discover_comparators --drug <your-drug>  # per drug you want
@@ -339,7 +339,8 @@ Everything runs locally via Docker. Zero external dependencies.
 
 - **Docker Desktop** with [Model Runner](https://docs.docker.com/desktop/features/model-runner/) enabled
 - **Python 3.11+** with [uv](https://docs.astral.sh/uv/)
-- **16GB RAM** recommended (OpenSearch 1.5GB + Qwen3.5-9B ~5.6GB)
+- **16GB RAM** recommended (OpenSearch 1.5GB + Gemma 4 12B MLX ~10GB)
+- **[Ollama](https://ollama.com)** installed (provides native MLX inference on Apple Silicon)
 - **~10GB disk** for full FAERS 2018–2026 dataset
 
 **Optional:** Set `GOOGLE_API_KEY` (free at [aistudio.google.com](https://aistudio.google.com)) to upgrade the investigator to a cloud LLM via Google AI Studio (e.g. `gemini-2.0-flash`). Set `INVESTIGATOR_MODEL` to override the local model path. If the Google API returns a 500/503/429 error, the investigator automatically falls back to the local Qwen3.5-9B for that signal — results remain valid but advisory quality may vary between runs.
