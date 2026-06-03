@@ -116,10 +116,9 @@ def _model_31b():
 # Forces quoting raw tool results to prevent training knowledge substitution
 # ---------------------------------------------------------------------------
 
-_investigator_agent = create_react_agent(
-    _model_31b(),
-    tools=[get_prr, check_class_effect, get_signal_trend],
-)
+# Phase 1 investigator removed — all tool calls and arithmetic are now Python.
+# See investigate() node: _get_prr + comparator loop + ratio in Python,
+# LLM only writes the INSIGHT sentence via _model_no_thinking(max_tokens=150).
 
 # ---------------------------------------------------------------------------
 # Phase 2 — Free-form deep investigator: any tools, any order, thinking=ON
@@ -670,76 +669,93 @@ async def investigate(state: DrugSafetyState) -> dict:
     total_tool_calls = 0
     classifications: list[dict] = []   # structured per-reaction parse results
 
+    from agent.tools.investigator_tools import _get_prr
+
     for signal in targets:
-        rxn       = signal["reaction"]
-        prr       = signal["prr"]
-        prr_lo    = signal.get("prr_lower", "?")
-        prr_hi    = signal.get("prr_upper", "?")
-        q_val     = signal.get("q_value", "?")
-        n         = signal["drug_count"]
+        rxn    = signal["reaction"]
+        prr    = signal["prr"]
+        prr_lo = signal.get("prr_lower", "?")
+        prr_hi = signal.get("prr_upper", "?")
+        q_val  = signal.get("q_value", "?")
+        n      = signal["drug_count"]
 
-        # Grounded prompt: forces quoting raw tool results BEFORE reasoning.
-        # Prevents thinking models from substituting training knowledge for
-        # actual FAERS data. "paste exact JSON" makes tool calls mandatory.
-        # New: also surface the 95% CI and BH q-value so the model's reasoning
-        # is grounded in the corrected statistics (not just the point PRR).
-        prompt = (
-            f"You are a pharmacovigilance expert. Investigate ONE signal:\n"
-            f"Signal: {rxn} for {drug}\n"
-            f"  PRR={prr} (95% CI: {prr_lo}–{prr_hi})  n={n}  BH q={q_val}\n\n"
-            f"{memory_context}"
-            f"Step 1: Call get_prr(drug='{drug}', reaction='{rxn}')\n"
-            f"        Write: \"get_prr returned: [paste exact JSON]\"\n\n"
-            f"Step 2: Call check_class_effect(reaction='{rxn}', comparator_drugs={comparators})\n"
-            f"        Write: \"check_class_effect returned: [paste exact JSON]\"\n\n"
-            f"Step 3: Call get_signal_trend(drug='{drug}', reaction='{rxn}')\n"
-            f"        Write: \"get_signal_trend returned: [paste exact JSON]\"\n\n"
-            f"Step 4: From ACTUAL tool results (not prior knowledge):\n"
-            f"        - Which comparator has the LOWEST PRR value (smallest number)?\n"
-            f"        - Calculate {drug}_PRR ÷ that_lowest_value\n"
-            f"        - Is ratio > 5? → DRUG_SPECIFIC\n\n"
-            f"Output (3 lines):\n"
-            f"CLASSIFICATION: [CLASS_EFFECT|DRUG_SPECIFIC] | [GROWING|STABLE|EMERGING] {persistent_tag}\n"
-            f"RATIO: {drug} is [X]x lowest comparator ([drug_name]=[prr_value from tool])\n"
-            f"INSIGHT: [one clinical sentence based on tool data and the CI/q provided above]"
-        )
+        # ── Phase 1: Python owns all arithmetic ─────────────────────────────
+        # Opus recommendation: move ratio + classification out of the LLM.
+        # _get_prr / comparator loop / min() are deterministic — no model
+        # quality needed; putting them in Python eliminates an entire class
+        # of LLM failure regardless of model size.
 
-        # Try primary investigator (Gemma4-31B or local); fall back to local on API errors.
-        # Google 500/503 errors are ServerError — not retried by tenacity, so we catch here.
-        try:
-            result = await _investigator_agent.ainvoke({"messages": [("user", prompt)]})
-        except Exception as api_err:
-            err_str = str(api_err).lower()
-            if any(k in err_str for k in ("500", "503", "internal", "unavailable", "resource_exhausted", "429")):
-                print(f"  [invest]   {rxn[:30]}: API error ({type(api_err).__name__}) — falling back to local model")
-                _local_inv = create_react_agent(_model(max_tokens=2000), tools=[get_prr, check_class_effect, get_signal_trend])
-                result = await _local_inv.ainvoke({"messages": [("user", prompt)]})
-            else:
-                raise
+        # Step 1: PRR for this specific drug name
+        prr_data  = await _get_prr([drug], rxn)
+        drug_prr  = prr_data.get("prr", prr)
 
-        # Extract text content
-        final_msg = result["messages"][-1]
-        raw = final_msg.content if hasattr(final_msg, "content") else ""
-        if isinstance(raw, list):
-            text = " ".join(p.get("text","") for p in raw if isinstance(p,dict) and p.get("type")=="text").strip()
-            if not text:
-                # Fallback to thinking tokens
-                thinking = " ".join(p.get("thinking", p.get("text",""))
-                                    for p in raw if isinstance(p,dict) and p.get("type")=="thinking")
-                text = f"*(from reasoning)*\n{thinking[-600:]}" if thinking else ""
+        # Step 2: class effect — PRR for each comparator
+        comp_raw: dict[str, float] = {}
+        for comp in comparators:
+            r = await _get_prr([comp], rxn)
+            comp_raw[comp] = r.get("prr", 0.0)
+
+        elevated     = [c for c, v in comp_raw.items() if v >= 2.0]
+        class_effect = len(elevated) >= max(1, len(comparators) * 0.6)
+
+        # Step 3: temporal trend
+        trend_json  = await get_signal_trend.ainvoke({"drug": drug, "reaction": rxn})
+        trend_data  = json.loads(trend_json) if isinstance(trend_json, str) else trend_json
+        trend       = trend_data.get("trend", "STABLE")
+        first_seen  = trend_data.get("first_seen", "unknown")
+
+        # Step 4: ratio — Python arithmetic, not LLM guess
+        if comp_raw:
+            min_comp_name = min(comp_raw, key=comp_raw.get)
+            min_comp_prr  = comp_raw[min_comp_name]
+            ratio = round(drug_prr / min_comp_prr, 2) if min_comp_prr > 0 else ">500"
         else:
-            text = str(raw).strip()
+            min_comp_name, min_comp_prr, ratio = "none", 0.0, 0.0
 
-        calls = sum(1 for m in result["messages"] if hasattr(m,"tool_calls") and m.tool_calls)
-        total_tool_calls += calls
-        print(f"  [invest]   {rxn[:30]}: {calls} calls")
+        effect = "DRUG_SPECIFIC" if (ratio == ">500" or
+                                      (isinstance(ratio, float) and ratio > 5)) \
+                 else "CLASS_EFFECT"
 
-        if not text.strip():
-            ci_str = (f"95% CI: {signal.get('prr_lower','?')}–{signal.get('prr_upper','?')}"
-                      if signal.get("prr_lower") else "")
-            text = (f"**{rxn}** (PRR={signal['prr']}{', ' + ci_str if ci_str else ''}, "
-                    f"n={signal['drug_count']}): signal confirmed. "
-                    f"Investigation inconclusive — see PRR/CI table for numeric evidence.")
+        total_tool_calls += 3   # 3 data-gathering calls, all in Python
+        print(f"  [invest]   {rxn[:30]}: 3 calls (Python)")
+
+        # ── LLM writes only the INSIGHT sentence ────────────────────────────
+        # The model receives pre-computed, verified facts; its only job is
+        # to translate them into one clinical sentence. No arithmetic needed.
+        comp_summary = ", ".join(f"{c}={v}" for c, v in comp_raw.items()) or "no comparators"
+        insight_prompt = (
+            f"Write ONE clinical sentence explaining this pharmacovigilance signal.\n\n"
+            f"Drug: {drug}  |  Reaction: {rxn}\n"
+            f"PRR={prr} (95% CI: {prr_lo}–{prr_hi})  n={n}  BH q={q_val}\n"
+            f"Classification: {effect}  |  "
+            f"Ratio: {drug}={drug_prr:.2f} vs lowest comparator "
+            f"{min_comp_name}={min_comp_prr}  ({ratio}x)\n"
+            f"Trend: {trend} (first seen: {first_seen})\n"
+            f"Comparators: {comp_summary}\n\n"
+            f"Output exactly: INSIGHT: [one clinical sentence grounded in the data above]"
+        )
+        try:
+            resp    = await _model_no_thinking(max_tokens=150).ainvoke(insight_prompt)
+            raw_ins = resp.content if hasattr(resp, "content") else ""
+            if isinstance(raw_ins, list):
+                raw_ins = " ".join(p.get("text","") for p in raw_ins
+                                   if isinstance(p, dict) and p.get("type") == "text")
+            raw_ins = str(raw_ins).strip()
+            if "<think>" in raw_ins:
+                raw_ins = raw_ins.split("</think>")[-1].strip()
+            insight = raw_ins.split("INSIGHT:")[-1].strip() if "INSIGHT:" in raw_ins else raw_ins
+        except Exception:
+            insight = (f"Signal {rxn} (PRR={prr}, n={n}) classified as {effect} "
+                       f"with a {trend.lower()} trend since {first_seen}.")
+
+        # ── Assemble structured output (CLASSIFICATION + RATIO from Python) ─
+        persistent_flag = "| PERSISTENT" if memory_context else ""
+        text = (
+            f"CLASSIFICATION: {effect} | {trend} {persistent_flag}\n"
+            f"RATIO: {drug} is {ratio}x lowest comparator "
+            f"({min_comp_name}={min_comp_prr})\n"
+            f"INSIGHT: {insight}"
+        )
 
         all_findings.append(f"**{rxn}**\n{text}")
 
