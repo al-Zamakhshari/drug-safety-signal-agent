@@ -16,9 +16,9 @@ import io
 from contextlib import redirect_stdout
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sse_starlette.sse import EventSourceResponse
 from dotenv import load_dotenv
 
@@ -158,6 +158,64 @@ async def _run_pipeline_streaming(drug_name: str) -> AsyncIterator[dict]:
         }
 
     yield {"event": "done", "data": json.dumps({"drug": drug_name})}
+
+
+@app.get("/api/briefing/{drug_name}")
+async def api_briefing(drug_name: str):
+    """
+    REST endpoint — runs the full pipeline and returns structured JSON.
+    Suitable for integration with external dashboards, automated reports,
+    or downstream clinical systems.
+
+    Response includes:
+      drug_name, drug_names, drug_total, faers_total,
+      prr_signals, anomaly_signals, literature, investigation,
+      signal_status, briefing (markdown), error
+    """
+    if not drug_name or len(drug_name.strip()) < 2:
+        raise HTTPException(status_code=422, detail="Drug name must be at least 2 characters")
+
+    from agent.pipeline import pipeline, DrugSafetyState
+
+    initial_state: DrugSafetyState = {
+        "drug_name":       drug_name.strip(),
+        "drug_names":      [],
+        "prr_signals":     [],
+        "drug_total":      0,
+        "faers_total":     0,
+        "prr_strat_field": None,
+        "anomaly_signals": [],
+        "label_text":      "",
+        "llt_expansions":  {},
+        "literature":      [],
+        "past_findings":   [],
+        "investigation":   [],
+        "classifications": [],
+        "signal_status":   [],
+        "_prior_run":      None,
+        "briefing":        "",
+        "error":           None,
+    }
+
+    try:
+        final_state = await pipeline.ainvoke(initial_state)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Return the full pipeline state; strip internal _prior_run (large, internal)
+    return JSONResponse({
+        "drug_name":       final_state.get("drug_name"),
+        "drug_names":      final_state.get("drug_names", []),
+        "drug_total":      final_state.get("drug_total", 0),
+        "faers_total":     final_state.get("faers_total", 0),
+        "prr_signals":     final_state.get("prr_signals", []),
+        "anomaly_signals": final_state.get("anomaly_signals", []),
+        "literature":      final_state.get("literature", []),
+        "investigation":   final_state.get("investigation", []),
+        "signal_status":   final_state.get("signal_status", []),
+        "briefing":        final_state.get("briefing", ""),
+        "error":           final_state.get("error"),
+    })
 
 
 @app.get("/analyze")

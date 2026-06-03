@@ -1,16 +1,39 @@
 """Tools for searching biomedical literature via PubMed."""
 
+import asyncio
 import httpx
 from typing import Any
 
 NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
+_RETRY_DELAYS = (1.0, 2.0, 4.0)
+_RETRY_STATUS  = {429, 500, 502, 503, 504}
+
 
 async def _get(url: str, params: dict) -> dict:
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(url, params={**params, "retmode": "json"})
-        r.raise_for_status()
-        return r.json()
+    """GET with exponential backoff on transient errors (429/5xx, timeouts)."""
+    last_exc: Exception | None = None
+    for delay in (*_RETRY_DELAYS, None):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(url, params={**params, "retmode": "json"})
+                if r.status_code in _RETRY_STATUS and delay is not None:
+                    await asyncio.sleep(delay)
+                    continue
+                r.raise_for_status()
+                return r.json()
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            last_exc = exc
+            if delay is not None:
+                await asyncio.sleep(delay)
+            continue
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in _RETRY_STATUS and delay is not None:
+                last_exc = exc
+                await asyncio.sleep(delay)
+                continue
+            raise
+    raise last_exc or RuntimeError(f"All retries failed for {url}")
 
 
 async def search_literature(drug_name: str, reaction_term: str, max_results: int = 5) -> dict[str, Any]:

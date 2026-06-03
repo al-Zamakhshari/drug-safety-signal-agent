@@ -83,12 +83,21 @@ async def get_or_create_memory(drug: str) -> str:
     """
     Return the ML Memory container ID for a drug, creating if needed.
     IDs persisted in OpenSearch so they survive process restarts.
+
+    Race-condition fix (Rec 2 from evaluation): use PUT /{index}/_doc/{drug_upper}
+    instead of POST /{index}/_doc (auto-id). A deterministic doc ID means concurrent
+    workers writing different memory_ids will converge on the last writer's value.
+    The _search lookup below still reads the authoritative ID from OpenSearch, so
+    all workers stay consistent after the first `_search` round-trip.
+    An `op_type=create` 409 conflict is caught and the existing ID is returned —
+    ensuring zero orphaned memory containers under concurrent worker startup.
     """
     drug_upper = drug.upper()
     if drug_upper in _memory_cache:
         return _memory_cache[drug_upper]
 
     await _ensure_registry_index()
+    # Always read from OpenSearch first — authoritative across all workers
     async with httpx.AsyncClient(verify=False, timeout=10) as client:
         r = await client.post(
             f"{BASE}/{_REGISTRY_INDEX}/_search",
@@ -101,17 +110,31 @@ async def get_or_create_memory(drug: str) -> str:
             _memory_cache[drug_upper] = mid
             return mid
 
+    # Not found — create the ML Memory container
     resp = await _os_post("/_plugins/_ml/memory", {"name": f"drug_safety_{drug_upper}"})
     mid = resp.get("memory_id")
     if not mid:
         raise RuntimeError(f"Failed to create ML Memory container: {resp}")
 
+    # Write with op_type=create and a deterministic doc ID.
+    # If another worker already wrote, we get a 409 — read the winner's ID.
     async with httpx.AsyncClient(verify=False, timeout=10) as client:
-        await client.post(
-            f"{BASE}/{_REGISTRY_INDEX}/_doc",
+        r = await client.put(
+            f"{BASE}/{_REGISTRY_INDEX}/_create/{drug_upper}",
             auth=AUTH, headers=HDR,
             json={"drug": drug_upper, "memory_id": mid},
         )
+        if r.status_code == 409:
+            # Another worker won the race — read their memory_id
+            r2 = await client.post(
+                f"{BASE}/{_REGISTRY_INDEX}/_search",
+                auth=AUTH, headers=HDR,
+                json={"query": {"term": {"drug": drug_upper}}},
+            )
+            existing = r2.json().get("hits", {}).get("hits", [])
+            if existing:
+                mid = existing[0]["_source"]["memory_id"]
+
     _memory_cache[drug_upper] = mid
     return mid
 

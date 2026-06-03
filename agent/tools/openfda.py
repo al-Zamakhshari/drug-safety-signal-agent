@@ -1,5 +1,6 @@
 """Tools for querying the openFDA public API."""
 
+import asyncio
 import httpx
 import json
 import os
@@ -75,41 +76,59 @@ async def get_meddra_llts(pt: str) -> list[str]:
     # The LLT field is reactionmeddrallt — filtering by PT and counting by LLT
     # gives us the LLT vocabulary for this PT.
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{OPENFDA_BASE}/event.json",
-                params={
-                    "search": f'patient.reaction.reactionmeddrapt.exact:"{pt_upper}"',
-                    "count":  "patient.reaction.reactionmeddrallt.exact",
-                    "limit":  "20",
-                },
-            )
-            data = resp.json()
-            llts = []
-            for item in data.get("results", []):
-                term = item.get("term", "").upper().strip()
-                # Keep only terms that share significant token overlap with the PT
-                # to exclude co-reported reactions that aren't true LLT synonyms
-                pt_tokens = set(re.findall(r"[a-z]+", pt_upper.lower()))
-                llt_tokens = set(re.findall(r"[a-z]+", term.lower()))
-                # Require at least half the PT tokens to appear in the LLT
-                if pt_tokens and len(pt_tokens & llt_tokens) >= max(1, len(pt_tokens) // 2):
-                    if term != pt_upper:
-                        llts.append(term)
-            cache[pt_upper] = llts
-            _save_llt_cache(cache)
-            return llts
+        data = await _get(
+            f"{OPENFDA_BASE}/event.json",
+            {
+                "search": f'patient.reaction.reactionmeddrapt.exact:"{pt_upper}"',
+                "count":  "patient.reaction.reactionmeddrallt.exact",
+                "limit":  "20",
+            },
+        )
+        llts = []
+        for item in data.get("results", []):
+            term = item.get("term", "").upper().strip()
+            pt_tokens  = set(re.findall(r"[a-z]+", pt_upper.lower()))
+            llt_tokens = set(re.findall(r"[a-z]+", term.lower()))
+            if pt_tokens and len(pt_tokens & llt_tokens) >= max(1, len(pt_tokens) // 2):
+                if term != pt_upper:
+                    llts.append(term)
+        cache[pt_upper] = llts
+        _save_llt_cache(cache)
+        return llts
     except Exception:
         cache[pt_upper] = []
         _save_llt_cache(cache)
         return []
 
 
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+_RETRY_DELAYS = (1.0, 2.0, 4.0)   # seconds; 3 attempts total
+
+
 async def _get(url: str, params: dict) -> dict:
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        return r.json()
+    """GET with exponential backoff on transient errors (429/5xx, timeouts)."""
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(url, params=params)
+                if r.status_code in _RETRY_STATUS and delay is not None:
+                    await asyncio.sleep(delay)
+                    continue
+                r.raise_for_status()
+                return r.json()
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            last_exc = exc
+            if delay is not None:
+                await asyncio.sleep(delay)
+            continue
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in _RETRY_STATUS and delay is not None:
+                last_exc = exc
+                await asyncio.sleep(delay)
+                continue
+            raise
+    raise last_exc or RuntimeError(f"All retries failed for {url}")
 
 
 async def normalize_drug_name(drug_name: str) -> dict[str, Any]:
