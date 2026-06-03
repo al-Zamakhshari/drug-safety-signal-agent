@@ -704,7 +704,18 @@ async def investigate(state: DrugSafetyState) -> dict:
             f"INSIGHT: [one clinical sentence based on tool data and the CI/q provided above]"
         )
 
-        result = await _investigator_agent.ainvoke({"messages": [("user", prompt)]})
+        # Try primary investigator (Gemma4-31B or local); fall back to local on API errors.
+        # Google 500/503 errors are ServerError — not retried by tenacity, so we catch here.
+        try:
+            result = await _investigator_agent.ainvoke({"messages": [("user", prompt)]})
+        except Exception as api_err:
+            err_str = str(api_err).lower()
+            if any(k in err_str for k in ("500", "503", "internal", "unavailable", "resource_exhausted", "429")):
+                print(f"  [invest]   {rxn[:30]}: API error ({type(api_err).__name__}) — falling back to local model")
+                _local_inv = create_react_agent(_model(max_tokens=2000), tools=[get_prr, check_class_effect, get_signal_trend])
+                result = await _local_inv.ainvoke({"messages": [("user", prompt)]})
+            else:
+                raise
 
         # Extract text content
         final_msg = result["messages"][-1]
