@@ -126,16 +126,30 @@ def _model_31b():
 # Model decides what to investigate based on Phase 1 findings
 # ---------------------------------------------------------------------------
 
+# Dataset date bounds — injected into deep_prompt for compare_time_periods correctness.
+# Model must know the actual data range to pick sensible recent/baseline windows;
+# without this it guesses and may truncate the recent window (correctness bug).
+_DATA_START = "2018-01-01"   # bulk ZIP coverage begins
+_DATA_END   = "2026-03-31"   # latest quarter indexed
+
 _deep_investigator_agent = create_react_agent(
-    _model_31b(),   # thinking=ON — model needs to reason about what to explore
+    _model_31b(),
     tools=[
         get_prr,                  # verify with different name variants
         check_class_effect,       # expand comparator set
         get_signal_trend,         # zoom into specific time periods
-        compare_time_periods,     # typed DataDistributionTool wrapper — EMERGING/GROWING test
+        compare_time_periods,     # EMERGING/GROWING test — use _DATA_START/_DATA_END
         list_opensearch_tools,    # discover registered OS MCP tools
         call_opensearch_tool,     # search_faers, AD tools, etc.
     ],
+    # System prompt: standing instruction on goal and budget (Opus rec).
+    # Keeps per-call deep_prompt focused on the specific signals.
+    system_prompt=(
+        "You are a pharmacovigilance investigator. Your goal is to determine "
+        "whether each flagged signal is a genuine emerging drug-specific risk "
+        "or a class-wide effect / reporting artefact. Stop as soon as you can "
+        "answer. Never exceed 5 tool calls total."
+    ),
 )
 
 
@@ -732,7 +746,7 @@ async def investigate(state: DrugSafetyState) -> dict:
             f"{min_comp_name}={min_comp_prr}  ({ratio}x)\n"
             f"Trend: {trend} (first seen: {first_seen})\n"
             f"Comparators: {comp_summary}\n\n"
-            f"Output exactly: INSIGHT: [one clinical sentence grounded in the data above]"
+            f"Respond with a single line starting \"INSIGHT: \" followed by one clinical sentence."
         )
         try:
             resp    = await _model_no_thinking(max_tokens=150).ainvoke(insight_prompt)
@@ -799,20 +813,24 @@ async def investigate(state: DrugSafetyState) -> dict:
     if interesting:
         print(f"  [deep]   interesting signal found — running free-form investigation")
         deep_prompt = (
-            f"You found these signals for {drug}:\n\n"
+            f"Signals for {drug} requiring deeper investigation:\n\n"
             f"{investigation_text}\n\n"
-            f"At least one is DRUG_SPECIFIC or has a high ratio. "
-            f"Use any tools in any order to dig deeper. Suggested approaches:\n"
-            f"- Call compare_time_periods(drug, reaction, recent_start, recent_end, "
-            f"baseline_start, baseline_end) to test whether the signal is EMERGING "
-            f"(absent in baseline) or GROWING. Use ISO dates, e.g. 2024-01-01.\n"
-            f"- Call call_opensearch_tool('list_anomaly_detectors', '{{}}') then "
+            f"Dataset spans {_DATA_START} → {_DATA_END}. "
+            f"At least one signal is DRUG_SPECIFIC. Pick only the tool calls that "
+            f"test a specific hypothesis — these are options, not a checklist:\n"
+            f"- compare_time_periods: test EMERGING/GROWING. "
+            f"Use recent={_DATA_END[-7:-3]}-01-01 → {_DATA_END}, "
+            f"baseline={_DATA_START} → {_DATA_START[:4]}-12-31 "
+            f"(adjust if first_seen is later)\n"
+            f"- call_opensearch_tool('list_anomaly_detectors', '{{}}') then "
             f"call_opensearch_tool('get_anomaly_results', '{{\"anomalyGradeThreshold\": 0.7}}') "
-            f"to confirm WHICH time window the class-ratio anomaly peaked.\n"
-            f"- Call get_prr with alternative drug name variants\n"
-            f"- Call check_class_effect with different comparator drugs\n"
-            f"- Search related reactions that might explain the pattern\n\n"
-            f"Run up to 5 tool calls. Summarise what you find in 2-3 sentences."
+            f"to confirm which time window spiked\n"
+            f"- get_prr with alternative drug name variants\n"
+            f"- check_class_effect with different comparator drugs\n"
+            f"- get_signal_trend for related reactions that may explain the pattern\n\n"
+            f"Often 1-2 calls suffice. Budget: 5 max.\n"
+            f"Conclude with: VERDICT: EMERGING|GROWING|STABLE|CLASS-CONFOUNDED — "
+            f"[one sentence on whether this is a genuine drug-specific risk]"
         )
         deep_result = await _deep_investigator_agent.ainvoke(
             {"messages": [("user", deep_prompt)]}
@@ -1096,9 +1114,15 @@ async def write_report(state: DrugSafetyState) -> dict:
     narrative_prompt = (
         f"Write 2-3 Key Findings bullet points and a Risk/Action line for {drug}.\n\n"
         f"PRR signals (pre-computed, do NOT repeat the numbers):\n{signals_json}\n\n"
-        f"Focus on: unlabeled signals (In FDA Label = false), signals with literature "
-        f"support, signals appearing in both PRR and anomaly detection.\n\n"
-        f"Format exactly:\n"
+        f"Focus on: unlabeled signals (labeled=false), signals with literature support, "
+        f"signals confirmed by both PRR and anomaly detection.\n"
+        f"If all signals are already labeled and lack literature, say so explicitly "
+        f"in one bullet rather than padding.\n\n"
+        f"Risk/Action rubric (use these thresholds consistently):\n"
+        f"  HIGH   / ESCALATE   — any unlabeled signal with PRR ≥ 10\n"
+        f"  MEDIUM / INVESTIGATE — any unlabeled signal with PRR ≥ 5\n"
+        f"  LOW    / MONITOR     — all signals labeled or PRR < 5\n\n"
+        f"Format:\n"
         f"### Key Findings\n* bullet 1\n* bullet 2\n\n"
         f"**Risk**: LOW/MEDIUM/HIGH\n"
         f"**Action**: MONITOR/INVESTIGATE/ESCALATE"
