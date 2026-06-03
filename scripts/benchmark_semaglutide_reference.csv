@@ -1,4 +1,4 @@
-# openFDA reference (independent of local OpenSearch),drug=SEMAGLUTIDE,"drug_total_openfda=83,614","n_total_openfda=20,328,575",fetched=2026-06-02T12:44:33
+# openFDA reference (independent of local OpenSearch),drug=SEMAGLUTIDE,"drug_total_openfda=83,614","n_total_openfda=20,328,575",fetched=2026-06-03T22:02:19
 reaction,n,PRR,PRR_lower_95,PRR_upper_95,ROR,ROR_lower_95,ROR_upper_95
 GLYCOSYLATED HAEMOGLOBIN INCREASED,1116,11.62,10.95,12.33,11.76,11.07,12.5
 INTESTINAL OBSTRUCTION,1087,7.51,7.08,7.98,7.6,7.15,8.07

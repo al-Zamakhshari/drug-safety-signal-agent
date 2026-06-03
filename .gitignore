@@ -7,3 +7,6 @@ faers_data/
 .DS_Store
 dist/
 *.egg-info/
+
+# Auto-generated caches — populated on first run, safe to delete to refresh
+.meddra_llt_cache.json
