@@ -301,6 +301,20 @@ Example: FDA label says "delays gastric emptying" — MedDRA PT is "IMPAIRED GAS
 
 ---
 
+### 10. HTTP retry with exponential backoff
+
+All external API calls (RxNorm, openFDA, PubMed/NCBI) retry up to 3× on transient failures (429, 500, 502, 503, 504, connection errors) with delays 1s → 2s → 4s. The pipeline has seen all of these in the wild — NCBI rate-limits free-tier requests, openFDA occasionally returns 503 under load.
+
+No external dependency (tenacity is not required): implemented as a tight async loop in each `_get()` helper. Falls back cleanly on `httpx.HTTPStatusError` for non-retryable errors (e.g. 400 bad request, 404 not found).
+
+---
+
+### 11. Multi-worker memory container safety
+
+`get_or_create_memory()` uses `PUT /{index}/_create/{drug}` (idempotent, conflict-safe) rather than `POST /_doc` (auto-ID). Under concurrent uvicorn workers, two workers could race to create an ML Memory container for a new drug — the `_create` op returns 409 if a document already exists, and the loser re-reads the winner's `memory_id`. No orphaned containers, no duplicate state.
+
+---
+
 ## Stack
 
 Everything runs locally via Docker. Zero external dependencies.
@@ -359,8 +373,15 @@ uv run python -m ingestion.compute_class_ratio                        # builds f
 # 5. Register OpenSearch MCP tools (one-time, enables free-form investigation)
 uv run python -m ingestion.register_mcp_tools
 
-# 6a. Web UI
+# 6a. Web UI  (SSE streaming dashboard)
 uv run python -m app.server          # → http://localhost:8080
+
+# Web server endpoints:
+#   GET /                          → streaming HTML dashboard
+#   GET /analyze?drug=semaglutide  → SSE stream of pipeline events + briefing
+#   GET /api/briefing/semaglutide  → REST: full structured JSON (prr_signals,
+#                                    anomaly_signals, investigation, signal_status)
+#   GET /health                    → {"status": "ok"}
 
 # 6b. CLI
 uv run python main.py semaglutide
